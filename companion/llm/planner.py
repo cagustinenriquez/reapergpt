@@ -748,6 +748,66 @@ def _ollama_plan(prompt: str, settings: Settings) -> ActionBatch | None:
     return _action_batch_from_obj(obj)
 
 
+def _openai_compatible_plan(
+    prompt: str,
+    settings: Settings,
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+) -> ActionBatch | None:
+    base_url = (base_url or "").strip().rstrip("/")
+    model = (model or "").strip()
+    if not base_url or not model:
+        return None
+
+    system_prompt = (
+        "You convert music production instructions into a strict JSON object with shape "
+        '{"actions":[{"type":"...", "params":{}}]}. '
+        "Allowed action types: transport.play, transport.stop, project.set_tempo, "
+        "regions.create_song_form, track.create, track.select, track.set_color, "
+        "track.set_volume, track.set_pan, track.set_name, track.set_input, track.set_stereo, "
+        "track.set_monitoring, track.set_record_mode, track.mute, track.solo, track.record_arm, "
+        "fx.add, automation.pan_ramp, automation.volume_ramp, reaper.action. "
+        "Return JSON only, no prose. If unsupported, return {\"actions\":[]}."
+    )
+
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if (api_key or "").strip():
+        headers["Authorization"] = f"Bearer {api_key.strip()}"
+
+    payload = {
+        "model": model,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt},
+        ],
+    }
+
+    with httpx.Client(timeout=settings.llm_timeout_seconds) as client:
+        response = client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+    content = message.get("content")
+    if isinstance(content, list):
+        # Some providers return content parts.
+        content = "".join(
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict)
+        )
+    obj = _extract_json_object(str(content or ""))
+    if not obj:
+        return None
+    return _action_batch_from_obj(obj)
+
+
 def plan_prompt_to_actions(prompt: str, settings: Settings) -> PlanningResult:
     prompt = (prompt or "").strip()
     if not prompt:
@@ -759,6 +819,32 @@ def plan_prompt_to_actions(prompt: str, settings: Settings) -> PlanningResult:
             batch = _ollama_plan(prompt, settings)
             if batch and batch.actions:
                 return PlanningResult(batch=batch, source="ollama")
+        except (httpx.HTTPError, ValidationError, ValueError, KeyError, TypeError):
+            pass
+    elif provider == "opencode":
+        try:
+            batch = _openai_compatible_plan(
+                prompt,
+                settings,
+                base_url=settings.opencode_base_url,
+                api_key=settings.opencode_api_key,
+                model=settings.opencode_model,
+            )
+            if batch and batch.actions:
+                return PlanningResult(batch=batch, source="opencode")
+        except (httpx.HTTPError, ValidationError, ValueError, KeyError, TypeError):
+            pass
+    elif provider == "kimi":
+        try:
+            batch = _openai_compatible_plan(
+                prompt,
+                settings,
+                base_url=settings.kimi_base_url,
+                api_key=settings.kimi_api_key,
+                model=settings.kimi_model,
+            )
+            if batch and batch.actions:
+                return PlanningResult(batch=batch, source="kimi")
         except (httpx.HTTPError, ValidationError, ValueError, KeyError, TypeError):
             pass
 

@@ -27,6 +27,12 @@ class Settings(BaseModel):
     llm_provider: str = Field(default="none")
     ollama_base_url: str = Field(default="http://127.0.0.1:11434")
     ollama_model: str = Field(default="qwen2.5:7b-instruct")
+    opencode_base_url: str = Field(default="")
+    opencode_model: str = Field(default="")
+    opencode_api_key: str = Field(default="")
+    kimi_base_url: str = Field(default="")
+    kimi_model: str = Field(default="")
+    kimi_api_key: str = Field(default="")
     llm_timeout_seconds: float = Field(default=20.0, gt=0)
 
     @classmethod
@@ -49,6 +55,12 @@ class Settings(BaseModel):
             llm_provider=os.getenv("REAPERGPT_LLM_PROVIDER", "none"),
             ollama_base_url=os.getenv("REAPERGPT_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
             ollama_model=os.getenv("REAPERGPT_OLLAMA_MODEL", "qwen2.5:7b-instruct"),
+            opencode_base_url=os.getenv("REAPERGPT_OPENCODE_BASE_URL", ""),
+            opencode_model=os.getenv("REAPERGPT_OPENCODE_MODEL", ""),
+            opencode_api_key=os.getenv("REAPERGPT_OPENCODE_API_KEY", ""),
+            kimi_base_url=os.getenv("REAPERGPT_KIMI_BASE_URL", ""),
+            kimi_model=os.getenv("REAPERGPT_KIMI_MODEL", ""),
+            kimi_api_key=os.getenv("REAPERGPT_KIMI_API_KEY", ""),
             llm_timeout_seconds=float(os.getenv("REAPERGPT_LLM_TIMEOUT_SECONDS", "20")),
         )
 
