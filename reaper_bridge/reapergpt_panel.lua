@@ -4,6 +4,10 @@
 local SCRIPT_NAME = "ReaperGPT"
 local LOCK_SECTION = "ReaperGPT"
 local LOCK_KEY = "PanelRunning"
+local COMPANION_PROMPT_URL = "http://127.0.0.1:8000/prompt"
+local BRIDGE_DIR = reaper.GetResourcePath() .. "/ReaperGPTBridge"
+local PANEL_PROMPT_PAYLOAD_FILE = BRIDGE_DIR .. "/panel_prompt_payload.json"
+local PANEL_PROMPT_LOG_FILE = BRIDGE_DIR .. "/panel_prompt_log.txt"
 
 -- Single instance lock
 if reaper.GetExtState(LOCK_SECTION, LOCK_KEY) == "1" then
@@ -21,6 +25,9 @@ local ui_open = true
 local first = true
 local input_text = ""
 local lines = {}
+local prompt_history = {}
+local prompt_history_index = nil
+local prompt_history_draft = ""
 
 local function cleanup()
   reaper.SetExtState(LOCK_SECTION, LOCK_KEY, "0", false)
@@ -38,6 +45,162 @@ end
 
 local function trim(s)
   return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function add_history_entry(s)
+  local t = trim(s)
+  if t == "" then return end
+  if prompt_history[#prompt_history] ~= t then
+    prompt_history[#prompt_history + 1] = t
+    if #prompt_history > 100 then
+      table.remove(prompt_history, 1)
+    end
+  end
+  prompt_history_index = nil
+  prompt_history_draft = ""
+end
+
+local function ensure_bridge_dir()
+  if reaper.RecursiveCreateDirectory then
+    reaper.RecursiveCreateDirectory(BRIDGE_DIR, 0)
+  end
+end
+
+local function write_file(path, content)
+  local f = io.open(path, "w")
+  if not f then return false end
+  f:write(content)
+  f:close()
+  return true
+end
+
+local function append_file(path, content)
+  local f = io.open(path, "a")
+  if not f then return false end
+  f:write(content)
+  f:close()
+  return true
+end
+
+local function json_escape(s)
+  s = tostring(s or "")
+  s = s:gsub("\\", "\\\\")
+  s = s:gsub('"', '\\"')
+  s = s:gsub("\r", "\\r")
+  s = s:gsub("\n", "\\n")
+  s = s:gsub("\t", "\\t")
+  return s
+end
+
+local function shell_quote(s)
+  return '"' .. tostring(s or ""):gsub('"', '\\"') .. '"'
+end
+
+local function log_prompt_event(kind, prompt, detail)
+  ensure_bridge_dir()
+  local stamp = os.date and os.date("%Y-%m-%d %H:%M:%S") or "unknown-time"
+  local line = string.format(
+    "[%s] %s | prompt=%s",
+    stamp,
+    tostring(kind or "unknown"),
+    tostring(prompt or ""):gsub("[\r\n]+", " ")
+  )
+  if detail and tostring(detail) ~= "" then
+    line = line .. " | " .. tostring(detail):gsub("[\r\n]+", " ")
+  end
+  append_file(PANEL_PROMPT_LOG_FILE, line .. "\n")
+end
+
+local function exec_command(command, timeout_ms)
+  if reaper.ExecProcess then
+    local a, b = reaper.ExecProcess(command, timeout_ms or 10000)
+    if type(a) == "number" and type(b) == "string" then
+      return a, b
+    end
+    if type(a) == "string" then
+      return 0, a
+    end
+  end
+
+  local p = io.popen(command .. " 2>&1", "r")
+  if not p then
+    return 1, "Failed to execute command"
+  end
+  local out = p:read("*a") or ""
+  p:close()
+  return 0, out
+end
+
+local function is_key_pressed(key_fn)
+  if not (reaper.ImGui_IsKeyPressed and key_fn) then
+    return false
+  end
+  local ok_key, key = pcall(key_fn)
+  if not ok_key then
+    return false
+  end
+  local ok_pressed, pressed = pcall(reaper.ImGui_IsKeyPressed, ctx, key)
+  if not ok_pressed then
+    return false
+  end
+  return pressed == true
+end
+
+local function summarize_prompt_response(raw)
+  local t = tostring(raw or "")
+  local detail = t:match('"detail"%s*:%s*"([^"]+)"')
+  if detail and detail ~= "" then
+    return detail
+  end
+  local accepted = 0
+  local rejected = 0
+  for status in t:gmatch('"status"%s*:%s*"(accepted|rejected)"') do
+    if status == "accepted" then accepted = accepted + 1 end
+    if status == "rejected" then rejected = rejected + 1 end
+  end
+  if accepted > 0 or rejected > 0 then
+    return string.format("AI dispatch results: %d accepted, %d rejected", accepted, rejected)
+  end
+  t = trim(t):gsub("%s+", " ")
+  if #t > 180 then
+    t = t:sub(1, 177) .. "..."
+  end
+  return t ~= "" and t or "No response body"
+end
+
+local function submit_prompt_to_companion(prompt)
+  ensure_bridge_dir()
+  local payload = '{"prompt":"' .. json_escape(prompt) .. '"}'
+  if not write_file(PANEL_PROMPT_PAYLOAD_FILE, payload) then
+    add_line("[ERR] could not write prompt payload file")
+    log_prompt_event("ai_error", prompt, "could not write payload file")
+    return false
+  end
+
+  local cmd = table.concat({
+    "curl.exe",
+    "-sS",
+    "--max-time", "8",
+    "-H", shell_quote("Content-Type: application/json"),
+    "-X", "POST",
+    shell_quote(COMPANION_PROMPT_URL),
+    "--data-binary",
+    shell_quote("@" .. PANEL_PROMPT_PAYLOAD_FILE),
+  }, " ")
+
+  local code, out = exec_command(cmd, 9000)
+  if code ~= 0 then
+    add_line("[ERR] AI prompt request failed (is the API running on 127.0.0.1:8000?)")
+    local msg = trim(out)
+    if msg ~= "" then add_line(msg) end
+    log_prompt_event("ai_error", prompt, msg ~= "" and msg or "request failed")
+    return false
+  end
+
+  local summary = summarize_prompt_response(out)
+  add_line("[AI] " .. summary)
+  log_prompt_event("ai", prompt, summary)
+  return true
 end
 
 local function get_track_by_index(track_index)
@@ -139,12 +302,14 @@ local function handle_local_command(raw)
   if cmd == "play" then
     reaper.OnPlayButton()
     add_line("transport play triggered")
+    log_prompt_event("local", raw, "transport.play")
     return
   end
 
   if cmd == "stop" then
     reaper.OnStopButton()
     add_line("transport stop triggered")
+    log_prompt_event("local", raw, "transport.stop")
     return
   end
 
@@ -154,8 +319,10 @@ local function handle_local_command(raw)
     if n and n > 0 and reaper.SetCurrentBPM then
       reaper.SetCurrentBPM(0, n, true)
       add_line(string.format("tempo set to %.2f BPM", n))
+      log_prompt_event("local", raw, string.format("project.set_tempo bpm=%.2f", n))
     else
       add_line("[ERR] invalid tempo")
+      log_prompt_event("local_error", raw, "invalid tempo")
     end
     return
   end
@@ -207,6 +374,11 @@ local function handle_local_command(raw)
     return
   end
 
+  if submit_prompt_to_companion(raw) then
+    return
+  end
+
+  log_prompt_event("unknown", raw, "no local handler and AI submit failed")
   add_line("[ERR] unknown command: " .. raw)
 end
 
@@ -245,6 +417,28 @@ local function loop()
     submitted, input_text = reaper.ImGui_InputText(ctx, "Prompt", input_text,
       reaper.ImGui_InputTextFlags_EnterReturnsTrue())
 
+    if reaper.ImGui_IsItemActive and reaper.ImGui_IsItemActive(ctx) and #prompt_history > 0 then
+      if is_key_pressed(reaper.ImGui_Key_UpArrow) then
+        if prompt_history_index == nil then
+          prompt_history_draft = input_text or ""
+          prompt_history_index = #prompt_history
+        elseif prompt_history_index > 1 then
+          prompt_history_index = prompt_history_index - 1
+        end
+        input_text = prompt_history[prompt_history_index] or input_text
+      elseif is_key_pressed(reaper.ImGui_Key_DownArrow) then
+        if prompt_history_index ~= nil then
+          if prompt_history_index < #prompt_history then
+            prompt_history_index = prompt_history_index + 1
+            input_text = prompt_history[prompt_history_index] or input_text
+          else
+            prompt_history_index = nil
+            input_text = prompt_history_draft or ""
+          end
+        end
+      end
+    end
+
     reaper.ImGui_SameLine(ctx)
     local clicked = reaper.ImGui_Button(ctx, "Send")
 
@@ -252,6 +446,7 @@ local function loop()
       local t = input_text
       input_text = ""
       if t ~= "" then
+        add_history_entry(t)
         add_line("> " .. t)
         handle_local_command(t)
       end

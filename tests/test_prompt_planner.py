@@ -101,3 +101,175 @@ def test_planner_supports_multi_action_track_prompt():
 
     assert result.batch is not None
     assert [a.type.value for a in result.batch.actions] == ["track.select", "track.solo"]
+
+
+def test_planner_maps_track_create_color_and_fx_chain():
+    settings = Settings()
+    result = plan_prompt_to_actions(
+        "create a new track colored blue and add fabfilter q4 to it",
+        settings,
+    )
+
+    assert result.source == "heuristic"
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == [
+        "track.create",
+        "track.set_color",
+        "fx.add",
+    ]
+    assert result.batch.actions[1].params == {"color": "blue", "track_ref": "last_created"}
+    assert result.batch.actions[2].params == {
+        "fx_name": "FabFilter Pro-Q 4",
+        "track_ref": "last_created",
+    }
+
+
+def test_planner_maps_fx_add_to_specific_track():
+    settings = Settings()
+    result = plan_prompt_to_actions("add fabfilter q4 to track 1", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["fx.add"]
+    assert result.batch.actions[0].params == {"fx_name": "FabFilter Pro-Q 4", "track_index": 1}
+
+
+def test_planner_maps_track_color_for_specific_track():
+    settings = Settings()
+    result = plan_prompt_to_actions("color track 2 blue", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.set_color"]
+    assert result.batch.actions[0].params == {"color": "blue", "track_index": 2}
+
+
+def test_planner_maps_track_color_with_track_first_word_order():
+    settings = Settings()
+    result = plan_prompt_to_actions("track 1 color blue", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.set_color"]
+    assert result.batch.actions[0].params == {"color": "blue", "track_index": 1}
+
+
+def test_planner_maps_track_volume_db_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("set volume to -5 db on track 8", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.set_volume"]
+    assert result.batch.actions[0].params == {"track_index": 8, "db": -5.0}
+
+
+def test_planner_maps_track_pan_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("set pan to 25% left on track 3", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.set_pan"]
+    assert result.batch.actions[0].params == {"track_index": 3, "pan": -0.25}
+
+
+def test_planner_maps_track_rename_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("rename track 2 to Vox Lead", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.set_name"]
+    assert result.batch.actions[0].params == {"track_index": 2, "name": "Vox Lead"}
+
+
+def test_planner_maps_generic_reaper_action_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("run action 40044", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["reaper.action"]
+    assert result.batch.actions[0].params == {"command_id": 40044}
+
+
+def test_planner_maps_track_input_midi_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("set the input of track 4 to midi #1", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.set_input"]
+    assert result.batch.actions[0].params == {
+        "track_index": 4,
+        "input_type": "midi",
+        "input_index": 1,
+        "midi_channel": 0,
+    }
+
+
+def test_planner_maps_track_input_audio_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("input #2 on track 5", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.set_input"]
+    assert result.batch.actions[0].params == {
+        "track_index": 5,
+        "input_type": "audio",
+        "input_index": 2,
+        "stereo": False,
+    }
+
+
+def test_planner_maps_make_track_stereo_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("make track 6 stereo", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.set_stereo"]
+    assert result.batch.actions[0].params == {"track_index": 6, "enabled": True}
+
+
+def test_planner_maps_pan_automation_time_range_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("set automation for pan for track 2 from 1:00 to 2:00", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["automation.pan_ramp"]
+    assert result.batch.actions[0].params == {
+        "track_index": 2,
+        "start_time_seconds": 60.0,
+        "end_time_seconds": 120.0,
+        "start_pan": 0.0,
+        "end_pan": 0.0,
+    }
+
+
+def test_planner_maps_track_monitoring_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("enable input monitoring on track 7", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.set_monitoring"]
+    assert result.batch.actions[0].params == {"track_index": 7, "enabled": True}
+
+
+def test_planner_maps_track_record_mode_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("set record mode to midi overdub on track 3", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.set_record_mode"]
+    assert result.batch.actions[0].params == {"track_index": 3, "mode": "midi_overdub"}
+
+
+def test_planner_maps_volume_automation_time_range_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions(
+        "set automation for volume for track 4 from 1:00 to 2:00 start volume -6 db end volume 0 db",
+        settings,
+    )
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["automation.volume_ramp"]
+    assert result.batch.actions[0].params == {
+        "track_index": 4,
+        "start_time_seconds": 60.0,
+        "end_time_seconds": 120.0,
+        "start_db": -6.0,
+        "end_db": 0.0,
+    }

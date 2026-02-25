@@ -59,10 +59,23 @@ class ReaperBridgeClient:
             "transport.stop",
             "project.set_tempo",
             "regions.create_song_form",
+            "track.create",
             "track.select",
+            "track.set_name",
+            "track.set_color",
+            "track.set_volume",
+            "track.set_pan",
+            "track.set_input",
+            "track.set_stereo",
+            "track.set_monitoring",
+            "track.set_record_mode",
             "track.mute",
             "track.solo",
             "track.record_arm",
+            "fx.add",
+            "automation.pan_ramp",
+            "automation.volume_ramp",
+            "reaper.action",
         }
         for action in batch.actions:
             if action.type.value in supported_types:
@@ -78,8 +91,11 @@ class ReaperBridgeClient:
                     "status": "rejected",
                     "detail": (
                         "file bridge MVP supports transport.play, transport.stop, "
-                        "project.set_tempo, regions.create_song_form, track.select, "
-                        "track.mute, track.solo, and track.record_arm"
+                        "project.set_tempo, regions.create_song_form, track.create, "
+                        "track.select, track.set_name, track.set_color, track.set_volume, "
+                        "track.set_pan, track.set_input, track.set_stereo, track.set_monitoring, "
+                        "track.set_record_mode, track.mute, track.solo, track.record_arm, fx.add, "
+                        "automation.pan_ramp, automation.volume_ramp, and reaper.action"
                     ),
                 }
             )
