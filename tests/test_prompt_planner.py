@@ -273,3 +273,92 @@ def test_planner_maps_volume_automation_time_range_prompt():
         "start_db": -6.0,
         "end_db": 0.0,
     }
+
+
+def test_planner_maps_render_selected_region_mp3_to_desktop_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions(
+        "render to mp3 128kbps for the selected region to my desktop",
+        settings,
+    )
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["project.render_region"]
+    assert result.batch.actions[0].params == {
+        "region_scope": "selected",
+        "format": "mp3",
+        "mp3_bitrate_kbps": 128,
+        "output_dir": "desktop",
+    }
+
+
+def test_planner_maps_create_send_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("create send from track 8 to track 9", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.create_send"]
+    assert result.batch.actions[0].params == {"source_track_index": 8, "dest_track_index": 9}
+
+
+def test_planner_maps_create_receive_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("create receive from track 7 to 8", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.create_receive"]
+    assert result.batch.actions[0].params == {"source_track_index": 7, "dest_track_index": 8}
+
+
+def test_planner_maps_create_track_short_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("create track", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.create"]
+    assert result.batch.actions[0].params == {}
+
+
+def test_planner_maps_create_track_named_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("create track named Guitar", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.create"]
+    assert result.batch.actions[0].params == {"name": "Guitar"}
+
+
+def test_planner_maps_add_track_called_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions('add track called "Vox Lead"', settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.create"]
+    assert result.batch.actions[0].params == {"name": "Vox Lead"}
+
+
+def test_planner_maps_make_track_short_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("make track", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.create"]
+    assert result.batch.actions[0].params == {}
+
+
+def test_planner_maps_delete_track_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("delete track 1", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.delete"]
+    assert result.batch.actions[0].params == {"track_index": 1}
+
+
+def test_planner_maps_remove_track_prompt():
+    settings = Settings()
+    result = plan_prompt_to_actions("remove track 2", settings)
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.delete"]
+    assert result.batch.actions[0].params == {"track_index": 2}

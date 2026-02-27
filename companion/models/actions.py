@@ -12,8 +12,10 @@ class ActionType(str, Enum):
     TRANSPORT_STOP = "transport.stop"
     SET_TEMPO = "project.set_tempo"
     ADD_MARKER = "project.add_marker"
+    PROJECT_RENDER_REGION = "project.render_region"
     CREATE_SONG_FORM_REGIONS = "regions.create_song_form"
     TRACK_CREATE = "track.create"
+    TRACK_DELETE = "track.delete"
     TRACK_SELECT = "track.select"
     TRACK_SET_NAME = "track.set_name"
     TRACK_SET_COLOR = "track.set_color"
@@ -23,6 +25,8 @@ class ActionType(str, Enum):
     TRACK_SET_STEREO = "track.set_stereo"
     TRACK_SET_MONITORING = "track.set_monitoring"
     TRACK_SET_RECORD_MODE = "track.set_record_mode"
+    TRACK_CREATE_SEND = "track.create_send"
+    TRACK_CREATE_RECEIVE = "track.create_receive"
     TRACK_MUTE = "track.mute"
     TRACK_SOLO = "track.solo"
     TRACK_RECORD_ARM = "track.record_arm"
@@ -59,6 +63,23 @@ class ReaperAction(BaseModel):
                 raise ValueError("regions.create_song_form does not accept params in MVP")
             return self
 
+        if self.type is ActionType.PROJECT_RENDER_REGION:
+            allowed = {"region_scope", "format", "mp3_bitrate_kbps", "output_dir"}
+            if set(params.keys()) != allowed:
+                raise ValueError(
+                    "project.render_region requires exactly: region_scope, format, mp3_bitrate_kbps, output_dir"
+                )
+            if params["region_scope"] not in {"selected"}:
+                raise ValueError("region_scope must be 'selected'")
+            if params["format"] not in {"mp3"}:
+                raise ValueError("format must be 'mp3' in current MVP")
+            bitrate = params["mp3_bitrate_kbps"]
+            if not isinstance(bitrate, int) or bitrate <= 0:
+                raise ValueError("mp3_bitrate_kbps must be an integer > 0")
+            if params["output_dir"] not in {"desktop"}:
+                raise ValueError("output_dir must be 'desktop' in current MVP")
+            return self
+
         if self.type is ActionType.SET_TEMPO:
             allowed = {"bpm"}
             if set(params.keys()) != allowed:
@@ -87,6 +108,17 @@ class ReaperAction(BaseModel):
                 raise ValueError("track.create accepts only: name (optional)")
             if "name" in params and (not isinstance(params["name"], str) or not params["name"].strip()):
                 raise ValueError("name must be a non-empty string")
+            return self
+
+        if self.type is ActionType.TRACK_DELETE:
+            allowed = {"track_index"}
+            if set(params.keys()) != allowed:
+                raise ValueError("track.delete requires exactly: track_index")
+            track_index = params["track_index"]
+            if not isinstance(track_index, int):
+                raise ValueError("track_index must be an integer")
+            if track_index <= 0:
+                raise ValueError("track_index must be >= 1")
             return self
 
         if self.type in {ActionType.TRACK_SET_COLOR, ActionType.FX_ADD}:
@@ -225,6 +257,20 @@ class ReaperAction(BaseModel):
                 raise ValueError("track_index must be an integer >= 1")
             if mode not in {"input", "midi_overdub", "midi_replace"}:
                 raise ValueError("mode must be one of: input, midi_overdub, midi_replace")
+            return self
+
+        if self.type in {ActionType.TRACK_CREATE_SEND, ActionType.TRACK_CREATE_RECEIVE}:
+            allowed = {"source_track_index", "dest_track_index"}
+            if set(params.keys()) != allowed:
+                raise ValueError(f"{self.type.value} requires exactly: source_track_index, dest_track_index")
+            src = params["source_track_index"]
+            dst = params["dest_track_index"]
+            if not isinstance(src, int) or src <= 0:
+                raise ValueError("source_track_index must be an integer >= 1")
+            if not isinstance(dst, int) or dst <= 0:
+                raise ValueError("dest_track_index must be an integer >= 1")
+            if src == dst:
+                raise ValueError("source_track_index and dest_track_index must be different")
             return self
 
         if self.type is ActionType.AUTOMATION_PAN_RAMP:

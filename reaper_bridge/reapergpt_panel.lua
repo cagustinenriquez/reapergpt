@@ -28,6 +28,8 @@ local lines = {}
 local prompt_history = {}
 local prompt_history_index = nil
 local prompt_history_draft = ""
+local ai_responses = {}
+local ai_selected_index = nil
 
 local function cleanup()
   reaper.SetExtState(LOCK_SECTION, LOCK_KEY, "0", false)
@@ -58,6 +60,39 @@ local function add_history_entry(s)
   end
   prompt_history_index = nil
   prompt_history_draft = ""
+end
+
+local function clip_text(s, n)
+  local t = tostring(s or "")
+  local limit = tonumber(n) or 80
+  if #t <= limit then return t end
+  return t:sub(1, limit - 3) .. "..."
+end
+
+local function add_ai_response_entry(prompt, raw_response, summary)
+  ai_responses[#ai_responses + 1] = {
+    prompt = tostring(prompt or ""),
+    raw = tostring(raw_response or ""),
+    summary = tostring(summary or ""),
+    timestamp = (os.date and os.date("%H:%M:%S")) or "",
+  }
+  if #ai_responses > 50 then
+    table.remove(ai_responses, 1)
+  end
+  ai_selected_index = #ai_responses
+end
+
+local function copy_to_clipboard(text)
+  local t = tostring(text or "")
+  if reaper.ImGui_SetClipboardText then
+    local ok = pcall(reaper.ImGui_SetClipboardText, ctx, t)
+    if ok then return true end
+  end
+  if reaper.CF_SetClipboard then
+    local ok = pcall(reaper.CF_SetClipboard, t)
+    if ok then return true end
+  end
+  return false
 end
 
 local function ensure_bridge_dir()
@@ -200,6 +235,7 @@ local function submit_prompt_to_companion(prompt)
   local summary = summarize_prompt_response(out)
   add_line("[AI] " .. summary)
   log_prompt_event("ai", prompt, summary)
+  add_ai_response_entry(prompt, out, summary)
   return true
 end
 
@@ -384,7 +420,7 @@ end
 
 local function loop()
   if first then
-    reaper.ImGui_SetNextWindowSize(ctx, 520, 260, reaper.ImGui_Cond_FirstUseEver())
+    reaper.ImGui_SetNextWindowSize(ctx, 760, 560, reaper.ImGui_Cond_FirstUseEver())
     first = false
   end
 
@@ -409,6 +445,60 @@ local function loop()
 
     for i = 1, #lines do
       reaper.ImGui_TextWrapped(ctx, lines[i])
+    end
+
+    reaper.ImGui_Separator(ctx)
+
+    reaper.ImGui_Text(ctx, "Recent AI Responses (click one to inspect/copy)")
+    if #ai_responses == 0 then
+      reaper.ImGui_TextDisabled(ctx, "No AI responses yet")
+    else
+      local start_i = math.max(1, #ai_responses - 9)
+      for i = #ai_responses, 1, -1 do
+        if i < start_i then break end
+        local entry = ai_responses[i]
+        local label = string.format(
+          "%s  %s  |  %s",
+          entry.timestamp or "",
+          clip_text(entry.prompt, 32),
+          clip_text(entry.summary, 52)
+        )
+        local selected = (ai_selected_index == i)
+        local clicked = false
+        if reaper.ImGui_Selectable then
+          clicked = reaper.ImGui_Selectable(ctx, label, selected)
+        else
+          reaper.ImGui_TextWrapped(ctx, label)
+        end
+        if clicked then
+          ai_selected_index = i
+        end
+      end
+    end
+
+    local selected_entry = ai_selected_index and ai_responses[ai_selected_index] or nil
+    if selected_entry then
+      reaper.ImGui_TextWrapped(ctx, "Selected prompt: " .. selected_entry.prompt)
+      if reaper.ImGui_Button(ctx, "Copy Selected Response JSON") then
+        if copy_to_clipboard(selected_entry.raw) then
+          add_line("[AI] copied selected response JSON to clipboard")
+        else
+          add_line("[ERR] clipboard copy unavailable (need ReaImGui clipboard support or SWS)")
+        end
+      end
+      reaper.ImGui_SameLine(ctx)
+      if reaper.ImGui_Button(ctx, "Copy Selected Prompt") then
+        if copy_to_clipboard(selected_entry.prompt) then
+          add_line("[AI] copied selected prompt to clipboard")
+        else
+          add_line("[ERR] clipboard copy unavailable (need ReaImGui clipboard support or SWS)")
+        end
+      end
+      local preview = selected_entry.raw or ""
+      reaper.ImGui_TextWrapped(ctx, clip_text(preview, 800))
+      if reaper.ImGui_IsItemHovered and reaper.ImGui_SetTooltip then
+        reaper.ImGui_SetTooltip(ctx, "Use Copy Selected Response JSON to paste into chat quickly")
+      end
     end
 
     reaper.ImGui_Separator(ctx)

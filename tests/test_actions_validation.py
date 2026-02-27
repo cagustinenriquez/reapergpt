@@ -17,12 +17,15 @@ def test_valid_actions_batch_passes():
 
 def test_unknown_action_rejected():
     with pytest.raises(ValidationError):
-        ReaperAction(type="track.delete", params={})
+        ReaperAction(type="track.destroy", params={})
 
 
 def test_missing_params_rejected():
     with pytest.raises(ValidationError):
         ReaperAction(type="project.set_tempo", params={})
+
+    with pytest.raises(ValidationError):
+        ReaperAction(type="project.render_region", params={})
 
 
 def test_extra_params_rejected():
@@ -59,6 +62,16 @@ def test_track_actions_reject_invalid_params():
 def test_new_track_and_fx_actions_validate_params():
     create = ReaperAction(type="track.create", params={})
     create_named = ReaperAction(type="track.create", params={"name": "Bass"})
+    delete_track = ReaperAction(type="track.delete", params={"track_index": 3})
+    render_region = ReaperAction(
+        type="project.render_region",
+        params={
+            "region_scope": "selected",
+            "format": "mp3",
+            "mp3_bitrate_kbps": 128,
+            "output_dir": "desktop",
+        },
+    )
     set_color_index = ReaperAction(type="track.set_color", params={"track_index": 2, "color": "blue"})
     set_color_ref = ReaperAction(
         type="track.set_color", params={"track_ref": "last_created", "color": "green"}
@@ -81,6 +94,8 @@ def test_new_track_and_fx_actions_validate_params():
     set_stereo = ReaperAction(type="track.set_stereo", params={"track_index": 4, "enabled": True})
     set_monitoring = ReaperAction(type="track.set_monitoring", params={"track_index": 4, "enabled": True})
     set_record_mode = ReaperAction(type="track.set_record_mode", params={"track_index": 4, "mode": "midi_overdub"})
+    create_send = ReaperAction(type="track.create_send", params={"source_track_index": 8, "dest_track_index": 9})
+    create_receive = ReaperAction(type="track.create_receive", params={"source_track_index": 7, "dest_track_index": 8})
     pan_ramp = ReaperAction(
         type="automation.pan_ramp",
         params={
@@ -106,6 +121,8 @@ def test_new_track_and_fx_actions_validate_params():
 
     assert create.params == {}
     assert create_named.params["name"] == "Bass"
+    assert delete_track.params["track_index"] == 3
+    assert render_region.params["mp3_bitrate_kbps"] == 128
     assert set_color_index.params["color"] == "blue"
     assert set_color_ref.params["track_ref"] == "last_created"
     assert fx_add_index.params["track_index"] == 1
@@ -118,6 +135,8 @@ def test_new_track_and_fx_actions_validate_params():
     assert set_stereo.params["enabled"] is True
     assert set_monitoring.params["enabled"] is True
     assert set_record_mode.params["mode"] == "midi_overdub"
+    assert create_send.params["dest_track_index"] == 9
+    assert create_receive.params["source_track_index"] == 7
     assert pan_ramp.params["end_pan"] == -0.5
     assert vol_ramp.params["start_db"] == -6.0
     assert reaper_action_id.params["command_id"] == 40044
@@ -127,6 +146,20 @@ def test_new_track_and_fx_actions_validate_params():
 def test_new_track_and_fx_actions_reject_invalid_params():
     with pytest.raises(ValidationError):
         ReaperAction(type="track.create", params={"name": ""})
+
+    with pytest.raises(ValidationError):
+        ReaperAction(type="track.delete", params={})
+
+    with pytest.raises(ValidationError):
+        ReaperAction(
+            type="project.render_region",
+            params={
+                "region_scope": "selected",
+                "format": "wav",
+                "mp3_bitrate_kbps": 128,
+                "output_dir": "desktop",
+            },
+        )
 
     with pytest.raises(ValidationError):
         ReaperAction(type="track.set_color", params={"color": "blue"})
@@ -169,6 +202,12 @@ def test_new_track_and_fx_actions_reject_invalid_params():
 
     with pytest.raises(ValidationError):
         ReaperAction(type="track.set_record_mode", params={"track_index": 1, "mode": "output"})
+
+    with pytest.raises(ValidationError):
+        ReaperAction(type="track.create_send", params={"source_track_index": 1})
+
+    with pytest.raises(ValidationError):
+        ReaperAction(type="track.create_receive", params={"source_track_index": 2, "dest_track_index": 2})
 
     with pytest.raises(ValidationError):
         ReaperAction(

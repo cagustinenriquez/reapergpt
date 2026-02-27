@@ -51,6 +51,11 @@ class ReaperBridgeClient:
             raise RuntimeError("File bridge requires REAPERGPT_REAPER_BRIDGE_DIR")
         return self.bridge_dir / "responses.txt"
 
+    def _state_file(self) -> Path:
+        if not self.bridge_dir:
+            raise RuntimeError("File bridge requires REAPERGPT_REAPER_BRIDGE_DIR")
+        return self.bridge_dir / "project_state.json"
+
     def _send_actions_file_bridge(self, batch: ActionBatch) -> dict[str, Any]:
         unsupported = []
         supported = []
@@ -58,8 +63,10 @@ class ReaperBridgeClient:
             "transport.play",
             "transport.stop",
             "project.set_tempo",
+            "project.render_region",
             "regions.create_song_form",
             "track.create",
+            "track.delete",
             "track.select",
             "track.set_name",
             "track.set_color",
@@ -69,6 +76,8 @@ class ReaperBridgeClient:
             "track.set_stereo",
             "track.set_monitoring",
             "track.set_record_mode",
+            "track.create_send",
+            "track.create_receive",
             "track.mute",
             "track.solo",
             "track.record_arm",
@@ -91,10 +100,11 @@ class ReaperBridgeClient:
                     "status": "rejected",
                     "detail": (
                         "file bridge MVP supports transport.play, transport.stop, "
-                        "project.set_tempo, regions.create_song_form, track.create, "
+                        "project.set_tempo, project.render_region, regions.create_song_form, track.create, track.delete, "
                         "track.select, track.set_name, track.set_color, track.set_volume, "
                         "track.set_pan, track.set_input, track.set_stereo, track.set_monitoring, "
-                        "track.set_record_mode, track.mute, track.solo, track.record_arm, fx.add, "
+                        "track.set_record_mode, track.create_send, track.create_receive, "
+                        "track.mute, track.solo, track.record_arm, fx.add, "
                         "automation.pan_ramp, automation.volume_ramp, and reaper.action"
                     ),
                 }
@@ -175,6 +185,56 @@ class ReaperBridgeClient:
         response = httpx.get(f"{self.base_url}/health", timeout=self.timeout_seconds)
         response.raise_for_status()
         return {"ok": True, "mode": self.mode, "detail": "reachable"}
+
+    def get_project_state(self) -> dict[str, Any]:
+        if self.mode == "dry_run":
+            return {
+                "ok": True,
+                "mode": self.mode,
+                "project": {
+                    "project_name": "Dry Run Project",
+                    "project_path": "",
+                    "tempo_bpm": 120.0,
+                    "play_state": "stopped",
+                    "tracks": [],
+                    "markers": [],
+                    "regions": [],
+                    "selection": {
+                        "selected_track_index": None,
+                        "selected_item_count": 0,
+                        "selected_region_index": None,
+                    },
+                    "envelopes_summary": {
+                        "volume_envelopes": 0,
+                        "pan_envelopes": 0,
+                        "other_envelopes": 0,
+                    },
+                },
+            }
+
+        if self.mode == "file_bridge":
+            state_file = self._state_file()
+            if not state_file.exists():
+                raise RuntimeError("REAPER file bridge project_state.json not found (is the bridge script running?)")
+            raw = state_file.read_text(encoding="utf-8", errors="replace")
+            data = json.loads(raw)
+            if not isinstance(data, dict):
+                raise RuntimeError("Invalid project state snapshot (expected JSON object)")
+            data.setdefault("ok", True)
+            data.setdefault("mode", self.mode)
+            return data
+
+        response = httpx.get(
+            f"{self.base_url}/state/project",
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise RuntimeError("Invalid HTTP bridge project state response")
+        data.setdefault("mode", self.mode)
+        data.setdefault("ok", True)
+        return data
 
     def send_actions(self, batch: ActionBatch) -> dict[str, Any]:
         if self.mode == "dry_run":

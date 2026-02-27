@@ -15,6 +15,7 @@ local BRIDGE_POLL_MS = 100
 local BRIDGE_DIR = reaper.GetResourcePath() .. "/ReaperGPTBridge"
 local COMMAND_FILE = BRIDGE_DIR .. "/commands.txt"
 local RESPONSE_FILE = BRIDGE_DIR .. "/responses.txt"
+local STATE_FILE = BRIDGE_DIR .. "/project_state.json"
 
 local function log(msg)
   reaper.ShowConsoleMsg("[ReaperGPT Bridge] " .. tostring(msg) .. "\n")
@@ -62,6 +63,43 @@ local function trim(s)
   return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+local function json_escape(s)
+  s = tostring(s or "")
+  s = s:gsub("\\", "\\\\")
+  s = s:gsub('"', '\\"')
+  s = s:gsub("\r", "\\r")
+  s = s:gsub("\n", "\\n")
+  s = s:gsub("\t", "\\t")
+  return s
+end
+
+local function json_string(s)
+  return '"' .. json_escape(s) .. '"'
+end
+
+local function json_number(n, fallback)
+  local v = tonumber(n)
+  if v == nil then
+    return tostring(fallback or 0)
+  end
+  return string.format("%.6f", v):gsub("(%..-)0+$", "%1"):gsub("%.$", "")
+end
+
+local function bool01(v)
+  return tonumber(v or 0) and tonumber(v or 0) > 0
+end
+
+local function track_to_index(track)
+  if not track or not reaper.CSurf_TrackToID then
+    return nil
+  end
+  local id = reaper.CSurf_TrackToID(track, false)
+  if type(id) ~= "number" or id < 1 then
+    return nil
+  end
+  return id
+end
+
 local function parse_bridge_params_json(raw)
   local params = {}
   local text = trim(raw)
@@ -72,6 +110,11 @@ local function parse_bridge_params_json(raw)
   local bpm = text:match('"bpm"%s*:%s*([%d%.]+)')
   if bpm then
     params.bpm = tonumber(bpm)
+  end
+
+  local mp3_bitrate_kbps = text:match('"mp3_bitrate_kbps"%s*:%s*(%d+)')
+  if mp3_bitrate_kbps then
+    params.mp3_bitrate_kbps = tonumber(mp3_bitrate_kbps)
   end
 
   local db = text:match('"db"%s*:%s*(-?[%d%.]+)')
@@ -117,6 +160,16 @@ local function parse_bridge_params_json(raw)
   local track_index = text:match('"track_index"%s*:%s*(%d+)')
   if track_index then
     params.track_index = tonumber(track_index)
+  end
+
+  local source_track_index = text:match('"source_track_index"%s*:%s*(%d+)')
+  if source_track_index then
+    params.source_track_index = tonumber(source_track_index)
+  end
+
+  local dest_track_index = text:match('"dest_track_index"%s*:%s*(%d+)')
+  if dest_track_index then
+    params.dest_track_index = tonumber(dest_track_index)
   end
 
   local enabled = text:match('"enabled"%s*:%s*(true|false)')
@@ -172,6 +225,21 @@ local function parse_bridge_params_json(raw)
   local input_type = text:match('"input_type"%s*:%s*"([^"]+)"')
   if input_type then
     params.input_type = input_type
+  end
+
+  local format = text:match('"format"%s*:%s*"([^"]+)"')
+  if format then
+    params.format = format
+  end
+
+  local region_scope = text:match('"region_scope"%s*:%s*"([^"]+)"')
+  if region_scope then
+    params.region_scope = region_scope
+  end
+
+  local output_dir = text:match('"output_dir"%s*:%s*"([^"]+)"')
+  if output_dir then
+    params.output_dir = output_dir
   end
 
   local input_index = text:match('"input_index"%s*:%s*(%d+)')
@@ -274,6 +342,20 @@ local function create_track(params)
   return "accepted", detail
 end
 
+local function delete_track(track_index)
+  local track, err = get_track_by_index(track_index)
+  if not track then
+    return "rejected", err
+  end
+  if not reaper.DeleteTrack then
+    return "rejected", "REAPER DeleteTrack unavailable"
+  end
+  reaper.DeleteTrack(track)
+  if reaper.TrackList_AdjustWindows then reaper.TrackList_AdjustWindows(false) end
+  if reaper.UpdateArrange then reaper.UpdateArrange() end
+  return "accepted", string.format("Deleted track %d", track_index)
+end
+
 local function set_track_color(params)
   params = params or {}
   local track, err = resolve_track_target(params)
@@ -337,6 +419,68 @@ local function set_project_tempo(bpm)
   end
   reaper.SetCurrentBPM(0, bpm, true)
   return "accepted", string.format("Project tempo set to %.2f BPM", bpm)
+end
+
+local function get_desktop_path()
+  local userprofile = os.getenv and os.getenv("USERPROFILE") or nil
+  if type(userprofile) == "string" and userprofile ~= "" then
+    return userprofile .. "\\Desktop"
+  end
+  local home = os.getenv and os.getenv("HOME") or nil
+  if type(home) == "string" and home ~= "" then
+    return home .. "/Desktop"
+  end
+  return nil
+end
+
+local function project_render_region(params)
+  params = params or {}
+  if params.region_scope ~= "selected" then
+    return "rejected", "project.render_region MVP supports only region_scope=selected"
+  end
+  if params.format ~= "mp3" then
+    return "rejected", "project.render_region MVP supports only format=mp3"
+  end
+  if params.output_dir ~= "desktop" then
+    return "rejected", "project.render_region MVP supports only output_dir=desktop"
+  end
+  if not reaper.GetSetProjectInfo or not reaper.GetSetProjectInfo_String then
+    return "rejected", "REAPER project render info APIs unavailable"
+  end
+  local desktop = get_desktop_path()
+  if not desktop then
+    return "rejected", "Could not resolve Desktop path"
+  end
+
+  -- Selected project regions bound
+  reaper.GetSetProjectInfo(0, "RENDER_BOUNDSFLAG", 3, true)
+  reaper.GetSetProjectInfo_String(0, "RENDER_FILE", desktop, true)
+  -- MP3 sink identifier (REAPER stores format tags in a compact form; this selects MP3 broadly).
+  reaper.GetSetProjectInfo_String(0, "RENDER_FORMAT", "l3pm", true)
+
+  local bitrate = tonumber(params.mp3_bitrate_kbps) or 128
+  local targets_before = ""
+  local ok_targets, targets = reaper.GetSetProjectInfo_String(0, "RENDER_TARGETS", "", false)
+  if ok_targets and type(targets) == "string" then
+    targets_before = targets
+  end
+
+  -- Render using most recent settings, auto-close render dialog (common REAPER action ID).
+  if not reaper.Main_OnCommand then
+    return "rejected", "REAPER Main_OnCommand unavailable"
+  end
+  reaper.Main_OnCommand(41824, 0)
+
+  local _, stats = reaper.GetSetProjectInfo_String(0, "RENDER_STATS", "", false)
+  local _, targets_after = reaper.GetSetProjectInfo_String(0, "RENDER_TARGETS", "", false)
+  local targets_summary = (type(targets_after) == "string" and targets_after ~= "") and targets_after or targets_before
+
+  return "accepted", string.format(
+    "Render triggered for selected region to Desktop as MP3 (requested %dkbps; actual bitrate follows current REAPER MP3 encoder settings). Targets: %s Stats: %s",
+    bitrate,
+    trim(targets_summary or ""),
+    trim(stats or "")
+  )
 end
 
 local function select_track(track_index)
@@ -437,6 +581,37 @@ local function set_track_record_mode(track_index, mode)
   if reaper.TrackList_AdjustWindows then reaper.TrackList_AdjustWindows(false) end
   if reaper.UpdateArrange then reaper.UpdateArrange() end
   return "accepted", string.format("Track %d record mode set to %s", track_index, mode_key)
+end
+
+local function create_track_send(params)
+  params = params or {}
+  local src_index = tonumber(params.source_track_index)
+  local dst_index = tonumber(params.dest_track_index)
+  if not src_index or not dst_index then
+    return "rejected", "source_track_index and dest_track_index are required"
+  end
+  if src_index == dst_index then
+    return "rejected", "source and destination tracks must be different"
+  end
+  local src_track, src_err = get_track_by_index(src_index)
+  if not src_track then
+    return "rejected", src_err
+  end
+  local dst_track, dst_err = get_track_by_index(dst_index)
+  if not dst_track then
+    return "rejected", dst_err
+  end
+  if not reaper.CreateTrackSend then
+    return "rejected", "REAPER CreateTrackSend unavailable"
+  end
+
+  local send_index = reaper.CreateTrackSend(src_track, dst_track)
+  if type(send_index) ~= "number" or send_index < 0 then
+    return "rejected", "Failed to create track send"
+  end
+  if reaper.TrackList_AdjustWindows then reaper.TrackList_AdjustWindows(false) end
+  if reaper.UpdateArrange then reaper.UpdateArrange() end
+  return "accepted", string.format("Created send from track %d to track %d (send slot %d)", src_index, dst_index, send_index + 1)
 end
 
 local function set_track_pan(track_index, pan)
@@ -707,6 +882,225 @@ local function create_song_form_regions()
   return "accepted", string.format("Created %d regions (default pop song form)", #sections)
 end
 
+local last_state_json = nil
+local last_state_write_time = 0
+
+local function build_project_state_json()
+  local project_name = ""
+  if reaper.GetProjectName then
+    local _, name = reaper.GetProjectName(0, "")
+    project_name = name or ""
+  end
+
+  local project_path = ""
+  if reaper.EnumProjects then
+    local _, path = reaper.EnumProjects(-1, "")
+    project_path = path or ""
+  elseif reaper.GetProjectPathEx then
+    local _, path = reaper.GetProjectPathEx(0, "")
+    project_path = path or ""
+  end
+
+  local tempo_bpm = nil
+  if reaper.Master_GetTempo then
+    tempo_bpm = reaper.Master_GetTempo()
+  end
+
+  local play_state = "stopped"
+  if reaper.GetPlayState then
+    local ps = tonumber(reaper.GetPlayState()) or 0
+    if ps == 0 then
+      play_state = "stopped"
+    elseif (ps & 4) ~= 0 then
+      play_state = "recording"
+    elseif (ps & 2) ~= 0 then
+      play_state = "paused"
+    else
+      play_state = "playing"
+    end
+  end
+
+  local tracks_json = {}
+  local selected_track_index = nil
+  local total_tracks = reaper.CountTracks and reaper.CountTracks(0) or 0
+  local volume_envs = 0
+  local pan_envs = 0
+  local other_envs = 0
+  for i = 0, total_tracks - 1 do
+    local track = reaper.GetTrack and reaper.GetTrack(0, i) or nil
+    if track then
+      local index = i + 1
+      local tname = ""
+      if reaper.GetTrackName then
+        local _, n = reaper.GetTrackName(track, "")
+        tname = n or ""
+      end
+      local selected = (reaper.IsTrackSelected and reaper.IsTrackSelected(track)) and true or false
+      if selected and selected_track_index == nil then
+        selected_track_index = index
+      end
+      local muted = bool01(reaper.GetMediaTrackInfo_Value and reaper.GetMediaTrackInfo_Value(track, "B_MUTE") or 0)
+      local solo = (tonumber(reaper.GetMediaTrackInfo_Value and reaper.GetMediaTrackInfo_Value(track, "I_SOLO") or 0) or 0) > 0
+      local recarm = bool01(reaper.GetMediaTrackInfo_Value and reaper.GetMediaTrackInfo_Value(track, "I_RECARM") or 0)
+      local vol = reaper.GetMediaTrackInfo_Value and reaper.GetMediaTrackInfo_Value(track, "D_VOL") or nil
+      local pan = reaper.GetMediaTrackInfo_Value and reaper.GetMediaTrackInfo_Value(track, "D_PAN") or nil
+
+      local fx_json = {}
+      local fx_count = reaper.TrackFX_GetCount and reaper.TrackFX_GetCount(track) or 0
+      for fx_i = 0, fx_count - 1 do
+        local fx_name = ""
+        if reaper.TrackFX_GetFXName then
+          local _, n = reaper.TrackFX_GetFXName(track, fx_i, "")
+          fx_name = n or ""
+        end
+        table.insert(fx_json, json_string(fx_name or ""))
+      end
+
+      local sends_json = {}
+      local send_count = reaper.GetTrackNumSends and reaper.GetTrackNumSends(track, 0) or 0
+      for send_i = 0, send_count - 1 do
+        local dest_track = reaper.GetTrackSendInfo_Value and reaper.GetTrackSendInfo_Value(track, 0, send_i, "P_DESTTRACK") or nil
+        local dest_index = track_to_index(dest_track)
+        if dest_index then
+          table.insert(sends_json, '{"track_index":' .. dest_index .. '}')
+        end
+      end
+
+      local receives_json = {}
+      local receive_count = reaper.GetTrackNumSends and reaper.GetTrackNumSends(track, -1) or 0
+      for recv_i = 0, receive_count - 1 do
+        local src_track = reaper.GetTrackSendInfo_Value and reaper.GetTrackSendInfo_Value(track, -1, recv_i, "P_SRCTRACK") or nil
+        local src_index = track_to_index(src_track)
+        if src_index then
+          table.insert(receives_json, '{"track_index":' .. src_index .. '}')
+        end
+      end
+
+      local env_count = reaper.CountTrackEnvelopes and reaper.CountTrackEnvelopes(track) or 0
+      for env_i = 0, env_count - 1 do
+        local env = reaper.GetTrackEnvelope and reaper.GetTrackEnvelope(track, env_i) or nil
+        local env_name = ""
+        if env and reaper.GetEnvelopeName then
+          local _, n = reaper.GetEnvelopeName(env, "")
+          env_name = n or ""
+        end
+        local env_lower = (env_name or ""):lower()
+        if env_lower:find("volume", 1, true) then
+          volume_envs = volume_envs + 1
+        elseif env_lower:find("pan", 1, true) then
+          pan_envs = pan_envs + 1
+        else
+          other_envs = other_envs + 1
+        end
+      end
+
+      local volume_db = 0
+      if type(vol) == "number" and vol > 0 then
+        volume_db = 20 * math.log(vol, 10)
+      end
+
+      table.insert(
+        tracks_json,
+        "{"
+          .. '"index":' .. index .. ","
+          .. '"name":' .. json_string(tname or "") .. ","
+          .. '"selected":' .. tostring(selected) .. ","
+          .. '"muted":' .. tostring(muted) .. ","
+          .. '"solo":' .. tostring(solo) .. ","
+          .. '"record_armed":' .. tostring(recarm) .. ","
+          .. '"volume_db":' .. json_number(volume_db, 0) .. ","
+          .. '"pan":' .. json_number(pan, 0) .. ","
+          .. '"fx_chain":[' .. table.concat(fx_json, ",") .. "],"
+          .. '"sends":[' .. table.concat(sends_json, ",") .. "],"
+          .. '"receives":[' .. table.concat(receives_json, ",") .. "]"
+          .. "}"
+      )
+    end
+  end
+
+  local selected_item_count = reaper.CountSelectedMediaItems and (reaper.CountSelectedMediaItems(0) or 0) or 0
+
+  local markers_json = {}
+  local regions_json = {}
+  if reaper.CountProjectMarkers and reaper.EnumProjectMarkers then
+    local _, num_markers, num_regions = reaper.CountProjectMarkers(0)
+    local total_markers_regions = (num_markers or 0) + (num_regions or 0)
+    for i = 0, total_markers_regions - 1 do
+      local retval, isrgn, pos, rgnend, name, mark_index = reaper.EnumProjectMarkers(i)
+      if retval then
+        if isrgn then
+          table.insert(
+            regions_json,
+            "{"
+              .. '"index":' .. (tonumber(mark_index) or 0) .. ","
+              .. '"name":' .. json_string(name or "") .. ","
+              .. '"start_seconds":' .. json_number(pos, 0) .. ","
+              .. '"end_seconds":' .. json_number(rgnend, 0) .. ","
+              .. '"selected":false'
+              .. "}"
+          )
+        else
+          table.insert(
+            markers_json,
+            "{"
+              .. '"index":' .. (tonumber(mark_index) or 0) .. ","
+              .. '"name":' .. json_string(name or "") .. ","
+              .. '"position_seconds":' .. json_number(pos, 0)
+              .. "}"
+          )
+        end
+      end
+    end
+  end
+
+  local selected_track_json = selected_track_index and tostring(selected_track_index) or "null"
+  local tempo_json = tempo_bpm and json_number(tempo_bpm, 120) or "null"
+
+  return "{"
+    .. '"ok":true,'
+    .. '"mode":"file_bridge",'
+    .. '"project":{'
+    .. '"project_name":' .. json_string(project_name) .. ","
+    .. '"project_path":' .. json_string(project_path) .. ","
+    .. '"tempo_bpm":' .. tempo_json .. ","
+    .. '"play_state":' .. json_string(play_state) .. ","
+    .. '"tracks":[' .. table.concat(tracks_json, ",") .. "],"
+    .. '"markers":[' .. table.concat(markers_json, ",") .. "],"
+    .. '"regions":[' .. table.concat(regions_json, ",") .. "],"
+    .. '"selection":{'
+    .. '"selected_track_index":' .. selected_track_json .. ","
+    .. '"selected_item_count":' .. tostring(selected_item_count) .. ","
+    .. '"selected_region_index":null'
+    .. "},"
+    .. '"envelopes_summary":{'
+    .. '"volume_envelopes":' .. tostring(volume_envs) .. ","
+    .. '"pan_envelopes":' .. tostring(pan_envs) .. ","
+    .. '"other_envelopes":' .. tostring(other_envs)
+    .. "}"
+    .. "}"
+    .. "}"
+end
+
+local function maybe_write_project_state()
+  if not reaper.time_precise then
+    return
+  end
+  local now = reaper.time_precise()
+  if (now - (last_state_write_time or 0)) < 0.5 then
+    return
+  end
+  last_state_write_time = now
+  local ok, snapshot_json = pcall(build_project_state_json)
+  if not ok or type(snapshot_json) ~= "string" or snapshot_json == "" then
+    return
+  end
+  if snapshot_json == last_state_json then
+    return
+  end
+  last_state_json = snapshot_json
+  write_file(STATE_FILE, snapshot_json)
+end
+
 local function dispatch_action(action_type, params)
   params = params or {}
   if action_type == "transport.play" then
@@ -720,8 +1114,14 @@ local function dispatch_action(action_type, params)
   if action_type == "project.set_tempo" then
     return set_project_tempo(params.bpm)
   end
+  if action_type == "project.render_region" then
+    return project_render_region(params)
+  end
   if action_type == "track.create" then
     return create_track(params)
+  end
+  if action_type == "track.delete" then
+    return delete_track(params.track_index)
   end
   if action_type == "track.select" then
     return select_track(params.track_index)
@@ -749,6 +1149,13 @@ local function dispatch_action(action_type, params)
   end
   if action_type == "track.set_record_mode" then
     return set_track_record_mode(params.track_index, params.mode)
+  end
+  if action_type == "track.create_send" then
+    return create_track_send(params)
+  end
+  if action_type == "track.create_receive" then
+    -- Normalized params still represent source -> destination route creation.
+    return create_track_send(params)
   end
   if action_type == "track.mute" then
     return set_track_flag(params.track_index, params.enabled, "B_MUTE", "Mute")
@@ -805,6 +1212,7 @@ local last_seen = nil
 
 local function tick()
   ensure_bridge_dir()
+  maybe_write_project_state()
 
   local raw = read_file(COMMAND_FILE)
   if raw and raw ~= "" and raw ~= last_seen then
@@ -821,5 +1229,5 @@ end
 
 ensure_bridge_dir()
 log("File bridge active: " .. BRIDGE_DIR)
-log("Supported actions: transport.play, transport.stop, project.set_tempo, regions.create_song_form, track.create, track.select, track.set_name, track.set_color, track.set_volume, track.set_pan, track.set_input, track.set_stereo, track.set_monitoring, track.set_record_mode, track.mute, track.solo, track.record_arm, fx.add, automation.pan_ramp, automation.volume_ramp, reaper.action")
+log("Supported actions: transport.play, transport.stop, project.set_tempo, project.render_region, regions.create_song_form, track.create, track.delete, track.select, track.set_name, track.set_color, track.set_volume, track.set_pan, track.set_input, track.set_stereo, track.set_monitoring, track.set_record_mode, track.create_send, track.create_receive, track.mute, track.solo, track.record_arm, fx.add, automation.pan_ramp, automation.volume_ramp, reaper.action")
 tick()

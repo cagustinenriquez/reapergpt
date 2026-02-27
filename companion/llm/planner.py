@@ -16,6 +16,7 @@ from companion.models.actions import ActionBatch, ReaperAction
 class PlanningResult:
     batch: ActionBatch | None
     source: str
+    llm_error: str | None = None
 
 
 def _extract_json_object(text: str) -> dict | None:
@@ -75,6 +76,22 @@ def _extract_track_index(prompt: str) -> int | None:
         return None
     track_index = int(match.group(1))
     return track_index if track_index > 0 else None
+
+
+def _extract_track_delete_request(prompt: str) -> int | None:
+    text = prompt.strip()
+    patterns = [
+        r"\bdelete\s+track\s+(\d+)\b",
+        r"\bremove\s+track\s+(\d+)\b",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, flags=re.IGNORECASE)
+        if not m:
+            continue
+        idx = int(m.group(1))
+        if idx > 0:
+            return idx
+    return None
 
 
 def _extract_track_volume_db(prompt: str) -> tuple[int, float] | None:
@@ -158,6 +175,23 @@ def _extract_track_rename(prompt: str) -> tuple[int, str] | None:
         raw_name = raw_name.strip('"').strip("'").strip()
         if track_index > 0 and raw_name:
             return track_index, raw_name
+    return None
+
+
+def _extract_track_create_name(prompt: str) -> str | None:
+    text = prompt.strip()
+    patterns = [
+        r"\b(?:create|add|make)\s+(?:a\s+new\s+|new\s+)?track\s+(?:named|called)\s+(.+)$",
+        r"\b(?:create|add|make)\s+(?:a\s+new\s+|new\s+)?track\s+name\s+(.+)$",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, flags=re.IGNORECASE)
+        if not m:
+            continue
+        raw_name = (m.group(1) or "").strip()
+        raw_name = raw_name.strip('"').strip("'").strip()
+        if raw_name:
+            return raw_name
     return None
 
 
@@ -392,6 +426,64 @@ def _extract_track_record_mode_request(prompt: str) -> tuple[int, str] | None:
     return None
 
 
+def _extract_render_region_request(prompt: str) -> dict[str, Any] | None:
+    text = prompt.strip()
+    lower = _normalize_prompt(text)
+    if "render" not in lower or "region" not in lower:
+        return None
+    if "selected region" not in lower:
+        return None
+    if "desktop" not in lower:
+        return None
+    if "mp3" not in lower:
+        return None
+
+    bitrate = None
+    m = re.search(r"\b(\d{2,4})\s*k\s*b\s*p\s*s\b", lower)
+    if not m:
+        m = re.search(r"\b(\d{2,4})\s*kbps\b", lower)
+    if m:
+        bitrate = int(m.group(1))
+    if bitrate is None:
+        bitrate = 128
+
+    return {
+        "region_scope": "selected",
+        "format": "mp3",
+        "mp3_bitrate_kbps": bitrate,
+        "output_dir": "desktop",
+    }
+
+
+def _extract_track_routing_request(prompt: str) -> tuple[str, dict[str, Any]] | None:
+    text = prompt.strip()
+    m = re.search(
+        r"\bcreate\s+send\s+from\s+track\s+(\d+)\s+to\s+track\s+(\d+)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        return "track.create_send", {
+            "source_track_index": int(m.group(1)),
+            "dest_track_index": int(m.group(2)),
+        }
+
+    m = re.search(
+        r"\bcreate\s+receive\s+from\s+track\s+(\d+)\s+to\s+(?:track\s+)?(\d+)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if m:
+        src = int(m.group(1))
+        dst = int(m.group(2))
+        # "create receive from track 7 to 8" means track 8 receives from track 7 => same route as send 7->8.
+        return "track.create_receive", {
+            "source_track_index": src,
+            "dest_track_index": dst,
+        }
+    return None
+
+
 def _extract_track_color(prompt: str) -> str | None:
     lower = _normalize_prompt(prompt)
     known = {"red", "orange", "yellow", "green", "blue", "purple", "pink", "white", "black"}
@@ -422,6 +514,8 @@ def _normalize_fx_name(raw_name: str) -> str:
 def _extract_fx_name(prompt: str) -> str | None:
     lower = _normalize_prompt(prompt)
     if " add " not in f" {lower} " and not lower.startswith("add "):
+        return None
+    if re.search(r"\badd\s+(?:a\s+new\s+|new\s+)?track\b", lower):
         return None
 
     match = re.search(r"\badd\s+(.+?)\s+to\s+(?:it|track\s+\d+)\b", lower)
@@ -482,23 +576,37 @@ def _heuristic_actions_for_prompt(prompt: str) -> list[ReaperAction]:
     volume_ramp_target = _extract_volume_ramp_request(cleaned)
     monitoring_target = _extract_track_monitoring_request(cleaned)
     record_mode_target = _extract_track_record_mode_request(cleaned)
+    render_region_target = _extract_render_region_request(cleaned)
+    routing_target = _extract_track_routing_request(cleaned)
     reaper_action_target = _extract_reaper_action_request(cleaned)
     wants_track_create = any(
         phrase in lower
         for phrase in {
+            "create track",
             "create a new track",
             "create new track",
+            "add track",
             "add a new track",
             "add new track",
             "make a new track",
             "make new track",
         }
     )
+    if lower in {"make track", "make a track"}:
+        wants_track_create = True
     track_color = _extract_track_color(cleaned)
     fx_name = _extract_fx_name(cleaned)
+    track_create_name = _extract_track_create_name(cleaned)
+    track_delete_index = _extract_track_delete_request(cleaned)
 
     if wants_track_create:
-        actions.append(ReaperAction(type="track.create", params={}))
+        create_params: dict[str, Any] = {}
+        if track_create_name:
+            create_params["name"] = track_create_name
+        actions.append(ReaperAction(type="track.create", params=create_params))
+
+    if track_delete_index is not None:
+        actions.append(ReaperAction(type="track.delete", params={"track_index": track_delete_index}))
 
     if track_color:
         color_params: dict[str, Any] = {"color": track_color}
@@ -568,6 +676,13 @@ def _heuristic_actions_for_prompt(prompt: str) -> list[ReaperAction]:
         actions.append(
             ReaperAction(type="track.set_record_mode", params={"track_index": rec_track_index, "mode": rec_mode})
         )
+
+    if render_region_target is not None:
+        actions.append(ReaperAction(type="project.render_region", params=render_region_target))
+
+    if routing_target is not None:
+        routing_action_type, routing_params = routing_target
+        actions.append(ReaperAction(type=routing_action_type, params=routing_params))
 
     if reaper_action_target is not None:
         actions.append(ReaperAction(type="reaper.action", params=reaper_action_target))
@@ -691,17 +806,19 @@ def _action_batch_from_obj(obj: dict[str, Any]) -> ActionBatch | None:
     return ActionBatch(actions=[ReaperAction(**item) for item in sanitized_actions])
 
 
-def _ollama_plan(prompt: str, settings: Settings) -> ActionBatch | None:
+def _ollama_plan(prompt: str, settings: Settings, project_state: dict[str, Any] | None = None) -> ActionBatch | None:
     system_prompt = (
         "You convert music production instructions into a strict JSON object with shape "
         '{"actions":[{"type":"...", "params":{}}]}. '
         "Allowed action types: transport.play, transport.stop, project.set_tempo, "
-        "regions.create_song_form, track.create, track.select, track.set_color, "
+        "project.render_region, regions.create_song_form, track.create, track.delete, track.select, track.set_color, "
         "track.set_volume, track.set_pan, track.set_name, track.set_input, track.set_stereo, "
         "track.set_monitoring, track.set_record_mode, track.mute, track.solo, track.record_arm, "
-        "fx.add, automation.pan_ramp, automation.volume_ramp, reaper.action. "
+        "track.create_send, track.create_receive, fx.add, automation.pan_ramp, automation.volume_ramp, reaper.action. "
         "For regions.create_song_form in this MVP, params must be {}. "
+        "project.render_region params: {\"region_scope\":\"selected\",\"format\":\"mp3\",\"mp3_bitrate_kbps\":<int>,\"output_dir\":\"desktop\"}. "
         "track.create params: {} or {\"name\": <string>}. "
+        "track.delete params: {\"track_index\": <int>=1+}. "
         "track.select params: {\"track_index\": <int>=1+}. "
         "track.set_color params: {\"color\": <string>, \"track_index\": <int>=1+} "
         "or {\"color\": <string>, \"track_ref\": \"last_created\"}. "
@@ -713,6 +830,7 @@ def _ollama_plan(prompt: str, settings: Settings) -> ActionBatch | None:
         "track.set_stereo params: {\"track_index\": <int>=1+, \"enabled\": <bool>}. "
         "track.set_monitoring params: {\"track_index\": <int>=1+, \"enabled\": <bool>}. "
         "track.set_record_mode params: {\"track_index\": <int>=1+, \"mode\": \"input\"|\"midi_overdub\"|\"midi_replace\"}. "
+        "track.create_send / track.create_receive params: {\"source_track_index\": <int>=1+, \"dest_track_index\": <int>=1+}. "
         "track.mute / track.solo / track.record_arm params: "
         "{\"track_index\": <int>=1+, \"enabled\": <bool>}. "
         "fx.add params: {\"fx_name\": <string>, \"track_index\": <int>=1+} "
@@ -725,11 +843,21 @@ def _ollama_plan(prompt: str, settings: Settings) -> ActionBatch | None:
         "with optional {\"section_id\": <int>} for advanced use. "
         "Return JSON only, no prose."
     )
-    user_prompt = (
-        "Instruction: "
-        + prompt
-        + "\nIf unsupported, return {\"actions\":[]}."
-    )
+    context_json = ""
+    if isinstance(project_state, dict):
+        try:
+            # Keep context bounded for small local models while still being useful.
+            raw = json.dumps(project_state, separators=(",", ":"), ensure_ascii=True)
+            context_json = raw[:12000]
+        except (TypeError, ValueError):
+            context_json = ""
+    user_prompt = "Instruction: " + prompt
+    if context_json:
+        user_prompt += (
+            "\nProject snapshot (current REAPER state, use when relevant for track/routing decisions): "
+            + context_json
+        )
+    user_prompt += "\nIf unsupported, return {\"actions\":[]}."
     payload = {
         "model": settings.ollama_model,
         "prompt": f"System: {system_prompt}\nUser: {user_prompt}\nAssistant:",
@@ -748,22 +876,36 @@ def _ollama_plan(prompt: str, settings: Settings) -> ActionBatch | None:
     return _action_batch_from_obj(obj)
 
 
-def plan_prompt_to_actions(prompt: str, settings: Settings) -> PlanningResult:
+def plan_prompt_to_actions(
+    prompt: str,
+    settings: Settings,
+    project_state: dict[str, Any] | None = None,
+    allow_heuristic_fallback: bool = True,
+) -> PlanningResult:
     prompt = (prompt or "").strip()
     if not prompt:
         raise ValueError("prompt must not be empty")
 
     provider = settings.llm_provider.strip().lower()
+    llm_error: str | None = None
     if provider == "ollama":
         try:
-            batch = _ollama_plan(prompt, settings)
+            batch = _ollama_plan(prompt, settings, project_state=project_state)
             if batch and batch.actions:
                 return PlanningResult(batch=batch, source="ollama")
-        except (httpx.HTTPError, ValidationError, ValueError, KeyError, TypeError):
-            pass
+            if not allow_heuristic_fallback:
+                return PlanningResult(
+                    batch=None,
+                    source="unsupported",
+                    llm_error="Ollama returned no supported actions for this prompt",
+                )
+        except (httpx.HTTPError, ValidationError, ValueError, KeyError, TypeError) as exc:
+            llm_error = f"{type(exc).__name__}: {exc}"
+            if not allow_heuristic_fallback:
+                return PlanningResult(batch=None, source="ollama_error", llm_error=llm_error)
 
     heuristic_actions = _heuristic_actions_for_prompt(prompt)
     if heuristic_actions:
-        return PlanningResult(batch=ActionBatch(actions=heuristic_actions), source="heuristic")
+        return PlanningResult(batch=ActionBatch(actions=heuristic_actions), source="heuristic", llm_error=llm_error)
 
-    return PlanningResult(batch=None, source="unsupported")
+    return PlanningResult(batch=None, source="unsupported", llm_error=llm_error)
