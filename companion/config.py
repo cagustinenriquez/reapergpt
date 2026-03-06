@@ -30,6 +30,7 @@ class Settings(BaseModel):
     llm_timeout_seconds: float = Field(default=20.0, gt=0)
     llm_allow_heuristic_fallback: bool = Field(default=True)
     plan_session_store_path: str = Field(default="")
+    profile_store_path: str = Field(default="")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -40,6 +41,9 @@ class Settings(BaseModel):
         default_session_store = ""
         if appdata:
             default_session_store = str(Path(appdata) / "ReaperGPTCompanion" / "plan_sessions.json")
+        default_profile_store = ""
+        if appdata:
+            default_profile_store = str(Path(appdata) / "ReaperGPTCompanion" / "profile.json")
 
         return cls(
             host=os.getenv("REAPERGPT_HOST", "127.0.0.1"),
@@ -57,6 +61,7 @@ class Settings(BaseModel):
             llm_timeout_seconds=float(os.getenv("REAPERGPT_LLM_TIMEOUT_SECONDS", "20")),
             llm_allow_heuristic_fallback=_env_bool("REAPERGPT_LLM_ALLOW_HEURISTIC_FALLBACK", True),
             plan_session_store_path=os.getenv("REAPERGPT_PLAN_SESSION_STORE_PATH", default_session_store),
+            profile_store_path=os.getenv("REAPERGPT_PROFILE_STORE_PATH", default_profile_store),
         )
 
 

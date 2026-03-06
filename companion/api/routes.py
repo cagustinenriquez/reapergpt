@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from companion.config import Settings, get_settings
 from companion.daws.reaper.client import ReaperBridgeClient
 from companion.llm.planner import plan_prompt_to_actions
+from companion.memory.store import apply_user_profile_update, load_user_profile, save_user_profile
 from companion.models.actions import ActionBatch, ReaperAction
 from companion.models.envelope import (
     ExecutePlanRequest,
@@ -20,12 +21,16 @@ from companion.models.envelope import (
     PlanRequest,
     PlanResponse,
     ProjectStateResponse,
+    ProjectStateSnapshot,
     PromptClarificationQuestion,
     PromptClarificationResponse,
     PromptContinueRequest,
     PromptDispatchRequest,
     SubmitActionsRequest,
     SubmitActionsResponse,
+    UserProfilePreferences,
+    UserProfileResponse,
+    UserProfileUpdateRequest,
 )
 from companion.services.action_dispatcher import ActionDispatcher
 
@@ -195,7 +200,11 @@ def _track_kind(name: str) -> str:
     return "other"
 
 
-def _starter_fx_for_track(kind: str, style: str) -> list[str]:
+def _starter_fx_for_track(kind: str, style: str, preferred_plugins: dict[str, list[str]] | None = None) -> list[str]:
+    if preferred_plugins:
+        custom = preferred_plugins.get(kind.lower())
+        if custom:
+            return custom
     if kind == "guitar":
         if style == "punk":
             return ["ReaEQ (Cockos)", "ReaComp (Cockos)"]
@@ -215,7 +224,14 @@ def _starter_fx_for_track(kind: str, style: str) -> list[str]:
     return []
 
 
-def _starter_fx_for_bus(bus_name: str, style: str) -> list[str]:
+def _starter_fx_for_bus(
+    bus_name: str, style: str, preferred_plugins: dict[str, list[str]] | None = None
+) -> list[str]:
+    if preferred_plugins:
+        bus_key = f"bus:{bus_name.strip().lower()}"
+        custom = preferred_plugins.get(bus_key)
+        if custom:
+            return custom
     lower = bus_name.lower()
     if "guitar" in lower and style == "metal":
         return ["ReaComp (Cockos)", "JS: Saturation"]
@@ -226,10 +242,18 @@ def _starter_fx_for_bus(bus_name: str, style: str) -> list[str]:
     return ["ReaComp (Cockos)"]
 
 
-def _build_garage_band_template_batch(prompt: str, answers: dict[str, Any]) -> ActionBatch:
+def _build_garage_band_template_batch(
+    prompt: str, answers: dict[str, Any], profile: UserProfilePreferences | None = None
+) -> ActionBatch:
     track_names = _extract_template_track_spec(prompt)
     include_fx = _is_truthy_answer(answers.get("fx_setup"))
-    style = _normalize_style(answers.get("sound_style"))
+    if "fx_setup" not in answers and profile is not None:
+        include_fx = profile.include_fx_by_default
+    style_source: Any = answers.get("sound_style")
+    if "sound_style" not in answers and profile is not None:
+        style_source = profile.default_sound_style
+    style = _normalize_style(style_source)
+    preferred_plugins = profile.preferred_plugins if profile is not None else None
     actions: list[ReaperAction] = []
 
     kinds_seen: set[str] = set()
@@ -239,7 +263,7 @@ def _build_garage_band_template_batch(prompt: str, answers: dict[str, Any]) -> A
         actions.append(ReaperAction(type="track.create", params={"name": name}))
         if not include_fx:
             continue
-        for fx_name in _starter_fx_for_track(kind, style):
+        for fx_name in _starter_fx_for_track(kind, style, preferred_plugins=preferred_plugins):
             actions.append(ReaperAction(type="fx.add", params={"track_ref": "last_created", "fx_name": fx_name}))
 
     if include_fx:
@@ -253,7 +277,7 @@ def _build_garage_band_template_batch(prompt: str, answers: dict[str, Any]) -> A
 
         for bus_name in bus_names:
             actions.append(ReaperAction(type="track.create", params={"name": bus_name}))
-            for fx_name in _starter_fx_for_bus(bus_name, style):
+            for fx_name in _starter_fx_for_bus(bus_name, style, preferred_plugins=preferred_plugins):
                 actions.append(ReaperAction(type="fx.add", params={"track_ref": "last_created", "fx_name": fx_name}))
 
     return ActionBatch(actions=actions)
@@ -276,6 +300,23 @@ def health(settings: Settings = Depends(get_settings)) -> dict[str, object]:
             "allow_heuristic_fallback": settings.llm_allow_heuristic_fallback,
         },
     }
+
+
+@router.get("/profile", response_model=UserProfileResponse)
+def get_profile(settings: Settings = Depends(get_settings)) -> UserProfileResponse:
+    profile = load_user_profile(settings)
+    return UserProfileResponse(profile=profile)
+
+
+@router.put("/profile", response_model=UserProfileResponse)
+def update_profile(
+    payload: UserProfileUpdateRequest,
+    settings: Settings = Depends(get_settings),
+) -> UserProfileResponse:
+    profile = load_user_profile(settings)
+    updated = apply_user_profile_update(profile, payload)
+    save_user_profile(settings, updated)
+    return UserProfileResponse(profile=updated)
 
 
 @router.get("/state/project", response_model=ProjectStateResponse)
@@ -304,6 +345,7 @@ def create_plan(
     client: ReaperBridgeClient = Depends(get_reaper_client),
 ) -> PlanResponse:
     _load_plan_sessions(settings)
+    profile = load_user_profile(settings)
     project_state: dict[str, Any] | None = None
     project_state_included = False
     state_error: str | None = None
@@ -319,6 +361,7 @@ def create_plan(
         payload.goal,
         settings,
         project_state=project_state,
+        preferences=profile.model_dump(mode="python"),
         allow_heuristic_fallback=settings.llm_allow_heuristic_fallback,
     )
     actions = planned.batch.actions if planned.batch is not None else []
@@ -380,6 +423,7 @@ def execute_plan(
     payload: ExecutePlanRequest,
     settings: Settings = Depends(get_settings),
     dispatcher: ActionDispatcher = Depends(get_dispatcher),
+    client: ReaperBridgeClient = Depends(get_reaper_client),
 ) -> ExecutePlanResponse:
     _load_plan_sessions(settings)
     results: list[ExecutePlanStepResult] = []
@@ -424,6 +468,14 @@ def execute_plan(
             if payload.stop_on_failure:
                 break
 
+    final_project_state: ProjectStateSnapshot | None = None
+    project_state_error: str | None = None
+    try:
+        state_payload = client.get_project_state()
+        final_project_state = ProjectStateResponse.model_validate(state_payload).project
+    except Exception as exc:
+        project_state_error = str(exc)
+
     return ExecutePlanResponse(
         success=failed_step_index is None,
         mode=mode,
@@ -432,7 +484,10 @@ def execute_plan(
         executed_steps=len(results),
         failed_step_index=failed_step_index,
         results=results,
+        final_project_state=final_project_state,
+        project_state_error=project_state_error,
     )
+
 
 
 @router.post("/prompt", response_model=Union[SubmitActionsResponse, PromptClarificationResponse])
@@ -441,12 +496,14 @@ def submit_prompt(
     settings: Settings = Depends(get_settings),
     dispatcher: ActionDispatcher = Depends(get_dispatcher),
 ) -> Union[SubmitActionsResponse, PromptClarificationResponse]:
+    profile = load_user_profile(settings)
     if _looks_like_garage_band_template(payload.prompt):
         return _start_template_clarification(payload.prompt)
 
     planned = plan_prompt_to_actions(
         payload.prompt,
         settings,
+        preferences=profile.model_dump(mode="python"),
         allow_heuristic_fallback=settings.llm_allow_heuristic_fallback,
     )
     if planned.batch is None:
@@ -470,6 +527,7 @@ def submit_prompt(
 @router.post("/prompt/respond", response_model=SubmitActionsResponse)
 def submit_prompt_clarification_response(
     payload: PromptContinueRequest,
+    settings: Settings = Depends(get_settings),
     dispatcher: ActionDispatcher = Depends(get_dispatcher),
 ) -> SubmitActionsResponse:
     session = _prompt_sessions.pop(payload.session_id, None)
@@ -480,6 +538,7 @@ def submit_prompt_clarification_response(
     if kind != "garage_band_template":
         raise HTTPException(status_code=400, detail="Unsupported prompt clarification session type")
 
-    batch = _build_garage_band_template_batch(str(session.get("prompt", "")), payload.answers)
+    profile = load_user_profile(settings)
+    batch = _build_garage_band_template_batch(str(session.get("prompt", "")), payload.answers, profile=profile)
     dispatched = dispatcher.dispatch_batch(batch)
     return dispatched.model_copy(update={"planner_source": "clarification_template"})

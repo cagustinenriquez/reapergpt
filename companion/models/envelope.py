@@ -60,6 +60,35 @@ class PromptContinueRequest(BaseModel):
     answers: dict[str, Any] = Field(default_factory=dict)
 
 
+class UserProfilePreferences(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preferred_plugins: dict[str, list[str]] = Field(default_factory=dict)
+    default_sound_style: str = "classic rock"
+    track_naming_prefix: str = ""
+    default_track_color: str = ""
+    routing_template_default: str = ""
+    include_fx_by_default: bool = True
+
+
+class UserProfileUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preferred_plugins: dict[str, list[str]] | None = None
+    default_sound_style: str | None = Field(default=None, min_length=1, max_length=80)
+    track_naming_prefix: str | None = Field(default=None, min_length=1, max_length=80)
+    default_track_color: str | None = Field(default=None, min_length=1, max_length=40)
+    routing_template_default: str | None = Field(default=None, min_length=1, max_length=80)
+    include_fx_by_default: bool | None = None
+
+
+class UserProfileResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool = True
+    profile: UserProfilePreferences
+
+
 class ProjectStateTrackRoute(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -196,3 +225,5 @@ class ExecutePlanResponse(BaseModel):
     executed_steps: int = Field(ge=0)
     failed_step_index: int | None = Field(default=None, ge=1)
     results: list[ExecutePlanStepResult] = Field(default_factory=list)
+    final_project_state: ProjectStateSnapshot | None = None
+    project_state_error: str | None = None

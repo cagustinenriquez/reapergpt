@@ -18,9 +18,17 @@ Planned later:
 - More action handlers (tempo, markers, track edits)
 - Expanded safety checks on the REAPER side
 
-## Which script should I run?
+## Auto-starting bridge + panel
 
-- Use `reapergpt_panel.lua` if you want the in-REAPER chat window (recommended).
-- Use `reapergpt_bridge.lua` only if you want a headless bridge without UI.
+`reapergpt_startup_launcher.lua` loads both the headless bridge and the panel scripts, and `reapergpt_setup_autostart.lua`
+registers that launcher as REAPER’s global startup action (requires SWS 2.13+ to call `NF_SetGlobalStartupAction`).citeturn6search0
 
-Do not run both at the same time, because both poll the same bridge files.
+To enable it:
+1. Install the SWS extension (2.13 or newer).
+2. Place the four `reaper_bridge/*.lua` scripts inside your REAPER `Scripts` folder.
+3. Run `reapergpt_setup_autostart.lua` from REAPER once; the success dialog will confirm the global startup action was set.
+4. Restart REAPER — the bridge and panel will launch automatically.
+
+If you prefer manual control, run `reapergpt_panel.lua` for the UI or `reapergpt_bridge.lua` for the headless bridge.
+
+Do not run `reapergpt_panel.lua` and `reapergpt_bridge.lua` twice at once, because both poll the same bridge files.

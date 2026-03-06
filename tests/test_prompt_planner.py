@@ -362,3 +362,17 @@ def test_planner_maps_remove_track_prompt():
     assert result.batch is not None
     assert [a.type.value for a in result.batch.actions] == ["track.delete"]
     assert result.batch.actions[0].params == {"track_index": 2}
+
+
+def test_planner_uses_profile_defaults_for_track_create():
+    settings = Settings()
+    result = plan_prompt_to_actions(
+        "create track",
+        settings,
+        preferences={"default_track_color": "orange", "track_naming_prefix": "Lead"},
+    )
+
+    assert result.batch is not None
+    assert [a.type.value for a in result.batch.actions] == ["track.create", "track.set_color"]
+    assert result.batch.actions[0].params == {"name": "Lead 1"}
+    assert result.batch.actions[1].params == {"color": "orange", "track_ref": "last_created"}

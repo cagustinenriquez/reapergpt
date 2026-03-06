@@ -232,10 +232,14 @@ def _parse_time_token_to_seconds(token: str) -> float | None:
     return None
 
 
-def _extract_track_input_request(prompt: str) -> dict[str, Any] | None:
+def _extract_track_input_request(prompt: str, allow_last_created: bool = False) -> dict[str, Any] | None:
     text = prompt.strip()
 
-    midi = re.search(r"\b(?:set\s+)?(?:the\s+)?input\s+of\s+track\s+(\d+)\s+to\s+midi\s*#?\s*(\d+)\b", text, re.IGNORECASE)
+    midi = re.search(
+        r"\b(?:set\s+)?(?:the\s+)?input\s+of\s+track\s+(\d+)\s+to\s+midi\s*#?\s*(\d+)\b",
+        text,
+        re.IGNORECASE,
+    )
     if midi:
         return {
             "track_index": int(midi.group(1)),
@@ -244,7 +248,11 @@ def _extract_track_input_request(prompt: str) -> dict[str, Any] | None:
             "midi_channel": 0,
         }
 
-    midi2 = re.search(r"\bmidi\s*#?\s*(\d+)\s+input\s+on\s+track\s+(\d+)\b", text, re.IGNORECASE)
+    midi2 = re.search(
+        r"\bmidi\s*#?\s*(\d+)\s+input\s+on\s+track\s+(\d+)\b",
+        text,
+        re.IGNORECASE,
+    )
     if midi2:
         return {
             "track_index": int(midi2.group(2)),
@@ -253,7 +261,11 @@ def _extract_track_input_request(prompt: str) -> dict[str, Any] | None:
             "midi_channel": 0,
         }
 
-    audio = re.search(r"\b(?:set\s+)?(?:the\s+)?input\s+of\s+track\s+(\d+)\s+to\s+(stereo\s+)?input\s*#?\s*(\d+)\b", text, re.IGNORECASE)
+    audio = re.search(
+        r"\b(?:set\s+)?(?:the\s+)?input\s+of\s+track\s+(\d+)\s+to\s+(stereo\s+)?input\s*#?\s*(\d+)\b",
+        text,
+        re.IGNORECASE,
+    )
     if audio:
         return {
             "track_index": int(audio.group(1)),
@@ -262,7 +274,11 @@ def _extract_track_input_request(prompt: str) -> dict[str, Any] | None:
             "stereo": bool(audio.group(2)),
         }
 
-    audio2 = re.search(r"\binput\s*#?\s*(\d+)\s+on\s+track\s+(\d+)\b", text, re.IGNORECASE)
+    audio2 = re.search(
+        r"\binput\s*#?\s*(\d+)\s+on\s+track\s+(\d+)\b",
+        text,
+        re.IGNORECASE,
+    )
     if audio2:
         return {
             "track_index": int(audio2.group(2)),
@@ -270,6 +286,24 @@ def _extract_track_input_request(prompt: str) -> dict[str, Any] | None:
             "input_index": int(audio2.group(1)),
             "stereo": False,
         }
+
+    if allow_last_created:
+        lower = text.lower()
+        general = re.search(
+            r"\bset\s+(?:the\s+)?input\s+(?:to|into)\s+(midi|audio)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if general:
+            input_type = general.group(1).lower()
+            params: dict[str, Any] = {
+                "track_ref": "last_created",
+                "input_type": "midi" if input_type == "midi" else "audio",
+                "input_index": 1,
+            }
+            if params["input_type"] == "midi":
+                params["midi_channel"] = 0
+            return params
 
     return None
 
@@ -530,10 +564,11 @@ def _extract_fx_name(prompt: str) -> str | None:
     return None
 
 
-def _heuristic_actions_for_prompt(prompt: str) -> list[ReaperAction]:
+def _heuristic_actions_for_prompt(prompt: str, preferences: dict[str, Any] | None = None) -> list[ReaperAction]:
     cleaned = prompt.strip()
     lower = _normalize_prompt(cleaned)
     actions: list[ReaperAction] = []
+    preferences = preferences or {}
 
     if not cleaned:
         return actions
@@ -566,19 +601,6 @@ def _heuristic_actions_for_prompt(prompt: str) -> list[ReaperAction]:
     if bpm is not None:
         actions.append(ReaperAction(type="project.set_tempo", params={"bpm": bpm}))
 
-    track_index = _extract_track_index(cleaned)
-    volume_target = _extract_track_volume_db(cleaned)
-    pan_target = _extract_track_pan(cleaned)
-    rename_target = _extract_track_rename(cleaned)
-    input_target = _extract_track_input_request(cleaned)
-    stereo_target = _extract_track_stereo_request(cleaned)
-    pan_ramp_target = _extract_pan_ramp_request(cleaned)
-    volume_ramp_target = _extract_volume_ramp_request(cleaned)
-    monitoring_target = _extract_track_monitoring_request(cleaned)
-    record_mode_target = _extract_track_record_mode_request(cleaned)
-    render_region_target = _extract_render_region_request(cleaned)
-    routing_target = _extract_track_routing_request(cleaned)
-    reaper_action_target = _extract_reaper_action_request(cleaned)
     wants_track_create = any(
         phrase in lower
         for phrase in {
@@ -594,6 +616,20 @@ def _heuristic_actions_for_prompt(prompt: str) -> list[ReaperAction]:
     )
     if lower in {"make track", "make a track"}:
         wants_track_create = True
+
+    track_index = _extract_track_index(cleaned)
+    volume_target = _extract_track_volume_db(cleaned)
+    pan_target = _extract_track_pan(cleaned)
+    rename_target = _extract_track_rename(cleaned)
+    input_target = _extract_track_input_request(cleaned, allow_last_created=wants_track_create)
+    stereo_target = _extract_track_stereo_request(cleaned)
+    pan_ramp_target = _extract_pan_ramp_request(cleaned)
+    volume_ramp_target = _extract_volume_ramp_request(cleaned)
+    monitoring_target = _extract_track_monitoring_request(cleaned)
+    record_mode_target = _extract_track_record_mode_request(cleaned)
+    render_region_target = _extract_render_region_request(cleaned)
+    routing_target = _extract_track_routing_request(cleaned)
+    reaper_action_target = _extract_reaper_action_request(cleaned)
     track_color = _extract_track_color(cleaned)
     fx_name = _extract_fx_name(cleaned)
     track_create_name = _extract_track_create_name(cleaned)
@@ -603,7 +639,18 @@ def _heuristic_actions_for_prompt(prompt: str) -> list[ReaperAction]:
         create_params: dict[str, Any] = {}
         if track_create_name:
             create_params["name"] = track_create_name
+        elif isinstance(preferences.get("track_naming_prefix"), str) and preferences.get("track_naming_prefix", "").strip():
+            create_params["name"] = f"{preferences['track_naming_prefix'].strip()} 1"
         actions.append(ReaperAction(type="track.create", params=create_params))
+
+    default_color = preferences.get("default_track_color")
+    if (
+        not track_color
+        and wants_track_create
+        and isinstance(default_color, str)
+        and default_color.strip()
+    ):
+        track_color = default_color.strip().lower()
 
     if track_delete_index is not None:
         actions.append(ReaperAction(type="track.delete", params={"track_index": track_delete_index}))
@@ -806,7 +853,12 @@ def _action_batch_from_obj(obj: dict[str, Any]) -> ActionBatch | None:
     return ActionBatch(actions=[ReaperAction(**item) for item in sanitized_actions])
 
 
-def _ollama_plan(prompt: str, settings: Settings, project_state: dict[str, Any] | None = None) -> ActionBatch | None:
+def _ollama_plan(
+    prompt: str,
+    settings: Settings,
+    project_state: dict[str, Any] | None = None,
+    preferences: dict[str, Any] | None = None,
+) -> ActionBatch | None:
     system_prompt = (
         "You convert music production instructions into a strict JSON object with shape "
         '{"actions":[{"type":"...", "params":{}}]}. '
@@ -857,6 +909,15 @@ def _ollama_plan(prompt: str, settings: Settings, project_state: dict[str, Any] 
             "\nProject snapshot (current REAPER state, use when relevant for track/routing decisions): "
             + context_json
         )
+    if isinstance(preferences, dict) and preferences:
+        try:
+            pref_json = json.dumps(preferences, separators=(",", ":"), ensure_ascii=True)[:4000]
+            user_prompt += (
+                "\nUser profile preferences (apply when the instruction implies defaults such as "
+                "'my style' or unspecified track color/name): " + pref_json
+            )
+        except (TypeError, ValueError):
+            pass
     user_prompt += "\nIf unsupported, return {\"actions\":[]}."
     payload = {
         "model": settings.ollama_model,
@@ -880,6 +941,7 @@ def plan_prompt_to_actions(
     prompt: str,
     settings: Settings,
     project_state: dict[str, Any] | None = None,
+    preferences: dict[str, Any] | None = None,
     allow_heuristic_fallback: bool = True,
 ) -> PlanningResult:
     prompt = (prompt or "").strip()
@@ -890,7 +952,7 @@ def plan_prompt_to_actions(
     llm_error: str | None = None
     if provider == "ollama":
         try:
-            batch = _ollama_plan(prompt, settings, project_state=project_state)
+            batch = _ollama_plan(prompt, settings, project_state=project_state, preferences=preferences)
             if batch and batch.actions:
                 return PlanningResult(batch=batch, source="ollama")
             if not allow_heuristic_fallback:
@@ -904,7 +966,7 @@ def plan_prompt_to_actions(
             if not allow_heuristic_fallback:
                 return PlanningResult(batch=None, source="ollama_error", llm_error=llm_error)
 
-    heuristic_actions = _heuristic_actions_for_prompt(prompt)
+    heuristic_actions = _heuristic_actions_for_prompt(prompt, preferences=preferences)
     if heuristic_actions:
         return PlanningResult(batch=ActionBatch(actions=heuristic_actions), source="heuristic", llm_error=llm_error)
 

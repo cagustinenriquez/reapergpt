@@ -291,6 +291,43 @@ local function select_track(track_index)
   add_line(string.format("selected track %d", track_index))
 end
 
+local function create_local_track(name)
+  if not reaper.InsertTrackAtIndex or not reaper.CountTracks or not reaper.GetTrack then
+    add_line("[ERR] REAPER API unavailable: InsertTrackAtIndex")
+    return
+  end
+  local track_name = trim(name)
+  local index0 = reaper.CountTracks(0)
+  local undo_label = "ReaperGPT: create track"
+  if reaper.Undo_BeginBlock then reaper.Undo_BeginBlock() end
+  reaper.InsertTrackAtIndex(index0, true)
+  local track = reaper.GetTrack(0, index0)
+  if not track then
+    if reaper.Undo_EndBlock then reaper.Undo_EndBlock(undo_label, -1) end
+    add_line("[ERR] failed to create track")
+    return
+  end
+
+  if track_name ~= "" and reaper.GetSetMediaTrackInfo_String then
+    reaper.GetSetMediaTrackInfo_String(track, "P_NAME", track_name, true)
+  end
+
+  if reaper.TrackList_AdjustWindows then
+    reaper.TrackList_AdjustWindows(false)
+  end
+  if reaper.UpdateArrange then
+    reaper.UpdateArrange()
+  end
+
+  if reaper.Undo_EndBlock then reaper.Undo_EndBlock(undo_label, -1) end
+
+  local detail = string.format("created track %d", index0 + 1)
+  if track_name ~= "" then
+    detail = detail .. string.format(' ("%s")', track_name)
+  end
+  add_line(detail)
+end
+
 local function create_song_form_regions()
   if not reaper.AddProjectMarker2 or not reaper.TimeMap2_QNToTime then
     add_line("[ERR] REAPER region APIs unavailable")
@@ -330,7 +367,8 @@ local function create_song_form_regions()
 end
 
 local function handle_local_command(raw)
-  local cmd = trim(raw):lower()
+  local prompt_text = trim(raw)
+  local cmd = prompt_text:lower()
   if cmd == "" then
     return
   end
@@ -374,10 +412,18 @@ local function handle_local_command(raw)
     set_track_flag(tonumber(track_n), true, "B_MUTE", "mute")
     return
   end
+  if cmd == "mute" then
+    add_line("[PROMPT] please specify a track number, e.g. `mute track 3`")
+    return
+  end
 
   track_n = cmd:match("^unmute%s+track%s+(%d+)$")
   if track_n then
     set_track_flag(tonumber(track_n), false, "B_MUTE", "mute")
+    return
+  end
+  if cmd == "unmute" then
+    add_line("[PROMPT] please specify a track number, e.g. `unmute track 3`")
     return
   end
 
@@ -402,6 +448,18 @@ local function handle_local_command(raw)
   track_n = cmd:match("^disarm%s+track%s+(%d+)$")
   if track_n then
     set_track_flag(tonumber(track_n), false, "I_RECARM", "record arm")
+    return
+  end
+
+  local create_track_prefix = cmd:match("^(?:create|add|make)%s+(?:a%s+)?(?:new%s+)?track%s+(?:named|called)%s+")
+  local create_track_simple = cmd:match("^(?:create|add|make)%s+(?:a%s+)?(?:new%s+)?track$")
+  if create_track_prefix or create_track_simple then
+    local name = nil
+    if create_track_prefix then
+      local start_index = #create_track_prefix + 1
+      name = trim(prompt_text:sub(start_index))
+    end
+    create_local_track(name)
     return
   end
 

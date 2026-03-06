@@ -1,10 +1,11 @@
 from fastapi.testclient import TestClient
 
 import companion.api.routes as api_routes
-from companion.api.routes import get_dispatcher
+from companion.api.routes import get_dispatcher, get_reaper_client
 from companion.config import Settings, get_settings
 from companion.main import app
 from companion.models.actions import ActionBatch
+from companion.services.action_dispatcher import ActionDispatcher
 from companion.models.envelope import ActionDispatchResult, SubmitActionsResponse
 
 
@@ -80,6 +81,59 @@ def test_execute_plan_endpoint_runs_actions_sequentially():
     assert body["executed_steps"] == 2
     assert body["failed_step_index"] is None
     assert [r["status"] for r in body["results"]] == ["accepted", "accepted"]
+
+
+def test_execute_plan_endpoint_returns_final_project_state_snapshot():
+    client = TestClient(app)
+    response = client.post(
+        "/execute-plan",
+        json={
+            "actions": [
+                {"type": "transport.play", "params": {}},
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["final_project_state"] is not None
+    assert body["project_state_error"] is None
+    assert body["final_project_state"]["tempo_bpm"] == 120.0
+
+
+def test_execute_plan_endpoint_reports_project_state_error_when_unavailable():
+    class _BrokenClient:
+        def __init__(self) -> None:
+            self.mode = "dry_run"
+
+        def send_actions(self, batch: ActionBatch) -> dict[str, object]:
+            results = [
+                {"request_id": action.request_id, "status": "accepted", "detail": "stubbed"}
+                for action in batch.actions
+            ]
+            return {"mode": self.mode, "results": results}
+
+        def get_project_state(self) -> dict[str, object]:
+            raise RuntimeError("bridge unreachable")
+
+    fake_client = _BrokenClient()
+    app.dependency_overrides[get_dispatcher] = lambda: ActionDispatcher(fake_client)
+    app.dependency_overrides[get_reaper_client] = lambda: fake_client
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/execute-plan",
+            json={"actions": [{"type": "transport.play", "params": {}}]},
+        )
+    finally:
+        app.dependency_overrides.pop(get_dispatcher, None)
+        app.dependency_overrides.pop(get_reaper_client, None)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["final_project_state"] is None
+    assert "bridge unreachable" in body["project_state_error"]
 
 
 def test_execute_plan_endpoint_executes_saved_plan_by_id():
@@ -314,3 +368,71 @@ def test_prompt_respond_endpoint_can_build_tracks_without_fx_setup():
     assert body["planner_source"] == "clarification_template"
     assert len(body["results"]) == 5
     assert all(item["status"] == "accepted" for item in body["results"])
+
+
+def test_profile_endpoint_roundtrip_persists_to_disk(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    base_settings = Settings()
+    test_settings = base_settings.model_copy(update={"profile_store_path": str(profile_path)})
+
+    app.dependency_overrides[get_settings] = lambda: test_settings
+    try:
+        client = TestClient(app)
+        initial = client.get("/profile")
+        assert initial.status_code == 200
+        initial_body = initial.json()
+        assert initial_body["ok"] is True
+        assert initial_body["profile"]["default_sound_style"] == "classic rock"
+
+        updated = client.put(
+            "/profile",
+            json={
+                "default_sound_style": "punk",
+                "default_track_color": "blue",
+                "track_naming_prefix": "Guitar",
+                "include_fx_by_default": False,
+                "preferred_plugins": {"guitar": ["Amp Sim", "EQ"]},
+            },
+        )
+        assert updated.status_code == 200
+        updated_body = updated.json()
+        assert updated_body["profile"]["default_sound_style"] == "punk"
+        assert updated_body["profile"]["default_track_color"] == "blue"
+        assert updated_body["profile"]["track_naming_prefix"] == "Guitar"
+        assert updated_body["profile"]["include_fx_by_default"] is False
+        assert updated_body["profile"]["preferred_plugins"]["guitar"] == ["Amp Sim", "EQ"]
+
+        follow_up = client.get("/profile")
+        assert follow_up.status_code == 200
+        assert follow_up.json()["profile"]["default_sound_style"] == "punk"
+        assert profile_path.exists()
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+
+def test_plan_endpoint_uses_profile_defaults_for_new_tracks(tmp_path):
+    profile_path = tmp_path / "profile.json"
+    base_settings = Settings()
+    test_settings = base_settings.model_copy(update={"profile_store_path": str(profile_path)})
+    app.dependency_overrides[get_settings] = lambda: test_settings
+    try:
+        client = TestClient(app)
+        put_resp = client.put(
+            "/profile",
+            json={
+                "default_track_color": "green",
+                "track_naming_prefix": "Rhythm",
+            },
+        )
+        assert put_resp.status_code == 200
+
+        response = client.post("/plan", json={"goal": "create track", "include_project_state": False})
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert [item["type"] for item in body["proposed_actions"]] == ["track.create", "track.set_color"]
+    assert body["proposed_actions"][0]["params"] == {"name": "Rhythm 1"}
+    assert body["proposed_actions"][1]["params"] == {"color": "green", "track_ref": "last_created"}
