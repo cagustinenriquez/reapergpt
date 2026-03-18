@@ -1,0 +1,67 @@
+reapergpt/
+  README.md
+  pyproject.toml
+  .env.example
+  .gitignore
+
+  docs/
+    architecture.md
+    reaper-setup.md
+    action-schema.md
+    safety.md
+
+  reaper_bridge/
+    README.md
+    reapergpt_bridge.lua
+    reapergpt_actions.lua
+    osc/
+      Default.ReaperOSC.note.txt
+
+  companion/
+    __init__.py
+    main.py                  # FastAPI entrypoint (HTTP + WebSocket)
+    config.py                # env + paths
+    logging_conf.py
+    models/
+      __init__.py
+      actions.py             # Pydantic action schema
+      state.py               # Project state schema
+    llm/
+      __init__.py
+      planner.py             # prompt -> plan (actions JSON)
+      composer.py            # arrangement suggestions (text + tasks)
+      safety.py              # validate/whitelist actions
+    daws/
+      __init__.py
+      reaper/
+        __init__.py
+        client.py            # talks to REAPER bridge (HTTP)
+        osc_client.py        # optional: python-osc transport/actions
+        state_export.py      # request state snapshot from REAPER
+      protools/
+        __init__.py
+        client_stub.py       # placeholder (Avid SDK bridge later)
+    audio/
+      __init__.py
+      render.py              # request stems/rough mix render
+      analysis.py            # librosa/essentia hooks (energy, sections, key)
+      features.py            # feature extraction utils
+    ui/
+      __init__.py
+      cli.py                 # minimal CLI chat
+      desktop_stub.py        # optional: tray app later
+    memory/
+      __init__.py
+      store.py               # local session memory (sqlite/json)
+    utils/
+      __init__.py
+      jsonschema.py
+      timecode.py
+
+  tests/
+    test_actions_validation.py
+    test_planner_outputs.py
+
+  scripts/
+    run_dev.ps1
+    run_dev.sh
