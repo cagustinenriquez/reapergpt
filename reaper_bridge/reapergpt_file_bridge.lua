@@ -32,7 +32,10 @@ local BRIDGE_DIR = normalize_path(REPO_ROOT .. "\\data\\reaper_bridge\\") .. "\\
 local REQUEST_PATH = BRIDGE_DIR .. "pending_plan.json"
 local RESULT_PATH = BRIDGE_DIR .. "execution_result.json"
 local STATE_PATH = BRIDGE_DIR .. "project_state.json"
+local ACTIVE_INSTANCE_PATH = BRIDGE_DIR .. "active_bridge_instance.json"
 local LOG_PATH = normalize_path(REPO_ROOT .. "\\data\\reaper_bridge_debug.log")
+local BRIDGE_INSTANCE_STALE_SECONDS = 5
+local BRIDGE_INSTANCE_ID = string.format("%d-%06d", os.time(), math.random(0, 999999))
 
 local COLOR_MAP = {
   red = {255, 80, 80},
@@ -307,6 +310,52 @@ local function write_json(path, payload)
   write_file(path, json.encode(payload))
 end
 
+local function register_bridge_instance()
+  local existing = read_file(ACTIVE_INSTANCE_PATH)
+  if existing and existing ~= "" then
+    local ok, payload = pcall(json.decode, existing)
+    if ok and type(payload) == "table" and payload.instance_id and payload.instance_id ~= BRIDGE_INSTANCE_ID then
+      local last_heartbeat = tonumber(payload.last_heartbeat or 0) or 0
+      if os.time() - last_heartbeat <= BRIDGE_INSTANCE_STALE_SECONDS then
+        append_log("bridge_duplicate_detected current=" .. BRIDGE_INSTANCE_ID .. " existing=" .. tostring(payload.instance_id))
+        write_json(STATE_PATH, {
+          bridge_connected = false,
+          bridge_warning = "Another bridge instance is already active.",
+          project_name = "REAPER Project",
+          tempo = reaper.Master_GetTempo(),
+          tracks = {},
+          sends = {},
+          receives = {},
+          markers = {},
+          regions = {},
+          selected_track_ids = {},
+          selected_item_count = 0,
+          folder_structure = {},
+          selection = {tracks = {}, items = {}},
+          envelopes_summary = {},
+        })
+        return false
+      end
+    end
+  end
+  write_json(ACTIVE_INSTANCE_PATH, {
+    instance_id = BRIDGE_INSTANCE_ID,
+    started_at = os.date("%Y-%m-%d %H:%M:%S"),
+    last_heartbeat = os.time(),
+    script = "reapergpt_file_bridge.lua",
+  })
+  return true
+end
+
+local function heartbeat_bridge_instance()
+  write_json(ACTIVE_INSTANCE_PATH, {
+    instance_id = BRIDGE_INSTANCE_ID,
+    started_at = os.date("%Y-%m-%d %H:%M:%S"),
+    last_heartbeat = os.time(),
+    script = "reapergpt_file_bridge.lua",
+  })
+end
+
 local function get_track_by_ref(ref)
   if type(ref) ~= "table" then
     return nil, "track reference must be an object"
@@ -362,8 +411,18 @@ local function create_send(args)
     error(dst_error)
   end
   local send_index = reaper.CreateTrackSend(src, dst)
+  local send_mode = 0
+  if args.pre_fader == true then
+    send_mode = 1
+  end
+  local mode_ok = reaper.SetTrackSendInfo_Value(src, 0, send_index, "I_SENDMODE", send_mode)
+  if not mode_ok then
+    error("failed to configure send mode")
+  end
   return {
     send_index = send_index,
+    send_mode = send_mode,
+    pre_fader = send_mode == 1,
   }
 end
 
@@ -482,6 +541,17 @@ local function collect_selected_items()
   return items
 end
 
+local function send_mode_name(mode)
+  local normalized = math.floor(tonumber(mode) or 0)
+  if normalized == 1 then
+    return "pre-fx"
+  end
+  if normalized == 2 or normalized == 3 then
+    return "post-fx"
+  end
+  return "post-fader"
+end
+
 local function collect_state()
   local tracks = {}
   local sends = {}
@@ -511,11 +581,15 @@ local function collect_state()
     local send_count = reaper.GetTrackNumSends(track, 0)
     for send_index = 0, send_count - 1 do
       local dest_track = reaper.GetTrackSendInfo_Value(track, 0, send_index, "P_DESTTRACK")
+      local send_mode = math.floor(reaper.GetTrackSendInfo_Value(track, 0, send_index, "I_SENDMODE"))
       local send_info = {
         index = send_index,
         src = id,
         dst = track_id(dest_track),
         dst_name = track_name(dest_track),
+        send_mode = send_mode,
+        send_mode_name = send_mode_name(send_mode),
+        pre_fader = send_mode == 1,
       }
       sends[#sends + 1] = send_info
       track_sends[#track_sends + 1] = send_info
@@ -523,11 +597,15 @@ local function collect_state()
     local receive_count = reaper.GetTrackNumSends(track, -1)
     for receive_index = 0, receive_count - 1 do
       local src_track = reaper.GetTrackSendInfo_Value(track, -1, receive_index, "P_SRCTRACK")
+      local send_mode = math.floor(reaper.GetTrackSendInfo_Value(track, -1, receive_index, "I_SENDMODE"))
       local receive_info = {
         index = receive_index,
         src = track_id(src_track),
         src_name = track_name(src_track),
         dst = id,
+        send_mode = send_mode,
+        send_mode_name = send_mode_name(send_mode),
+        pre_fader = send_mode == 1,
       }
       receives[#receives + 1] = receive_info
       track_receives[#track_receives + 1] = receive_info
@@ -651,6 +729,7 @@ end
 local last_request_id = nil
 
 local function process_request()
+  heartbeat_bridge_instance()
   ensure_dir(BRIDGE_DIR)
   local raw = read_file(REQUEST_PATH)
   if not raw or raw == "" then
@@ -700,6 +779,10 @@ ensure_dir(BRIDGE_DIR)
 append_log("script_dir=" .. SCRIPT_DIR)
 append_log("repo_root=" .. REPO_ROOT)
 append_log("bridge_dir=" .. BRIDGE_DIR)
-write_json(STATE_PATH, collect_state())
-append_log("initial state written")
-loop()
+if register_bridge_instance() then
+  write_json(STATE_PATH, collect_state())
+  append_log("initial state written")
+  loop()
+else
+  append_log("bridge_instance_passive " .. BRIDGE_INSTANCE_ID)
+end

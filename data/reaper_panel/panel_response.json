@@ -1,1 +1,1 @@
-{"ok":false,"summary":"No matching workflow yet. This is where an LLM-backed planner will plug in.","source":"unsupported","requires_confirmation":false,"plan_id":null,"steps":[]}
+{"ok":true,"summary":"Insert ReaEQ on Banjo.","source":"heuristic","requires_confirmation":false,"requires_clarification":false,"clarification":null,"plan_id":"0a39c056-e030-432d-9171-d357bfc9b5ed","steps":[{"tool":"insert_fx","args":{"track_ref":{"type":"track_id","value":4},"fx_name":"ReaEQ"}}]}

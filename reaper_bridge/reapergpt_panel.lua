@@ -32,6 +32,7 @@ local DATA_DIR = normalize_path(REPO_ROOT .. "\\data\\reaper_panel") .. "\\"
 local PANEL_LOG_PATH = normalize_path(REPO_ROOT .. "\\data\\reaper_panel.log")
 local ACTIVE_INSTANCE_PATH = DATA_DIR .. "active_instance.json"
 local API_BASE_URL = "http://127.0.0.1:8000"
+local PANEL_INSTANCE_STALE_SECONDS = 5
 math.randomseed(os.time())
 local PANEL_INSTANCE_ID = string.format("%d-%06d", os.time(), math.random(0, 999999))
 
@@ -40,15 +41,31 @@ local state = {
   plan_id = nil,
   plan_summary = "No preview loaded.",
   plan_steps = {},
+  clarification_id = nil,
+  clarification_question = nil,
+  clarification_options = {},
+  clarification_answers = {},
   last_result = "No request sent yet.",
   project_summary = "Unknown project state.",
+  project_detail_lines = {},
+  apply_summary = "No apply result yet.",
+  apply_result_lines = {},
+  verification_summary = "No verification run yet.",
+  verification_result_lines = {},
+  mismatch_lines = {},
   apply_pending = false,
   instance_warning = nil,
+  instance_read_only = false,
 }
 
 local json = {}
 local mouse = {down = false}
 local update_project_summary
+local append_line
+local summarize_project
+local format_step_result_line
+local format_verification_line
+local draw_text_lines
 
 local function append_log(message)
   reaper.RecursiveCreateDirectory(DATA_DIR, 0)
@@ -317,19 +334,38 @@ end
 
 local function write_active_instance()
   local existing = read_json_file(ACTIVE_INSTANCE_PATH)
-  if existing and existing.instance_id and existing.instance_id ~= PANEL_INSTANCE_ID then
+  local now = os.time()
+  if existing and existing.instance_id and existing.instance_id ~= PANEL_INSTANCE_ID and (now - tonumber(existing.last_heartbeat or 0)) <= PANEL_INSTANCE_STALE_SECONDS then
     state.instance_warning = "Another panel instance was already active: " .. tostring(existing.instance_id)
+    state.instance_read_only = true
     append_log("panel_duplicate_detected current=" .. PANEL_INSTANCE_ID .. " existing=" .. tostring(existing.instance_id))
+    return
   end
   write_file(
     ACTIVE_INSTANCE_PATH,
     json.encode({
       instance_id = PANEL_INSTANCE_ID,
       started_at = os.date("%Y-%m-%d %H:%M:%S"),
+      last_heartbeat = now,
       script = "reapergpt_panel.lua",
     })
   )
   append_log("panel_start instance=" .. PANEL_INSTANCE_ID)
+end
+
+local function heartbeat_active_instance()
+  if state.instance_read_only then
+    return
+  end
+  write_file(
+    ACTIVE_INSTANCE_PATH,
+    json.encode({
+      instance_id = PANEL_INSTANCE_ID,
+      started_at = os.date("%Y-%m-%d %H:%M:%S"),
+      last_heartbeat = os.time(),
+      script = "reapergpt_panel.lua",
+    })
+  )
 end
 
 local function clear_active_instance()
@@ -483,6 +519,11 @@ local function poll_apply_result()
   if not ok or type(status_payload) ~= "table" then
     state.apply_pending = false
     state.last_result = "Apply failed: invalid async status file."
+    state.apply_summary = "Apply failed."
+    state.apply_result_lines = {"Invalid async status file."}
+    state.verification_summary = "Verification unavailable."
+    state.verification_result_lines = {}
+    state.mismatch_lines = {}
     append_log("poll_apply_result invalid_status=" .. tostring(status_body))
     return
   end
@@ -497,6 +538,11 @@ local function poll_apply_result()
       end
     end
     state.last_result = "Apply failed: " .. tostring(message)
+    state.apply_summary = "Apply failed."
+    state.apply_result_lines = {tostring(message)}
+    state.verification_summary = "Verification unavailable."
+    state.verification_result_lines = {}
+    state.mismatch_lines = {}
     append_log("poll_apply_result error=" .. tostring(message))
     return
   end
@@ -504,18 +550,60 @@ local function poll_apply_result()
   local parsed_ok, payload = pcall(json.decode, response_body)
   if not parsed_ok or type(payload) ~= "table" then
     state.last_result = "Apply failed: invalid API response."
+    state.apply_summary = "Apply failed."
+    state.apply_result_lines = {"Invalid API response."}
+    state.verification_summary = "Verification unavailable."
+    state.verification_result_lines = {}
+    state.mismatch_lines = {}
     append_log("poll_apply_result invalid_response=" .. tostring(response_body))
     return
   end
   local results = payload.results or {}
   local success = payload.success ~= false
+  local verification_passed = payload.verification_passed == true
+  local verification_results = payload.verification_results or {}
+  local verification_errors = payload.verification_errors or {}
+
+  state.apply_result_lines = {}
+  for _, result in ipairs(results) do
+    append_line(state.apply_result_lines, format_step_result_line(result))
+  end
+  if #state.apply_result_lines == 0 then
+    append_line(state.apply_result_lines, "No per-step results returned.")
+  end
+
+  state.verification_result_lines = {}
+  for _, item in ipairs(verification_results) do
+    append_line(state.verification_result_lines, format_verification_line(item))
+  end
+  if #state.verification_result_lines == 0 then
+    append_line(state.verification_result_lines, "No verification checks returned.")
+  end
+
+  state.mismatch_lines = {}
+  for _, item in ipairs(verification_errors) do
+    append_line(state.mismatch_lines, item)
+  end
+
   if success then
-    state.last_result = string.format("Apply finished. Steps executed: %d", #results)
+    state.last_result = string.format("Apply finished. Steps executed: %d. Verification: %s", #results, verification_passed and "passed" or "failed")
+    state.apply_summary = string.format("Bridge executed %d step(s) successfully.", #results)
   else
     state.last_result = tostring(payload.project_state_error or "Apply failed.")
+    state.apply_summary = string.format("Apply returned %d step result(s).", #results)
   end
+  state.verification_summary = string.format(
+    "Verification %s. Checks: %d  Mismatches: %d",
+    verification_passed and "passed" or "failed",
+    #verification_results,
+    #verification_errors
+  )
   append_log("poll_apply_result success=" .. tostring(success) .. " steps=" .. tostring(#results))
-  update_project_summary()
+  if payload.final_project_state and type(payload.final_project_state) == "table" then
+    summarize_project(payload.final_project_state)
+  else
+    update_project_summary()
+  end
 end
 
 local function format_step(step)
@@ -539,36 +627,61 @@ local function format_step(step)
   return tool
 end
 
+local function clear_clarification()
+  state.clarification_id = nil
+  state.clarification_question = nil
+  state.clarification_options = {}
+end
+
 function update_project_summary()
   local ok, payload = api_request("GET", "/state/project", nil)
   if not ok then
     state.project_summary = "State refresh failed: " .. tostring(type(payload) == "table" and payload.detail or payload)
+    state.project_detail_lines = {}
     return
   end
-  local project = payload.project or {}
-  local track_count = #(project.tracks or {})
-  local send_count = #(project.sends or {})
-  state.project_summary = string.format(
-    "Tracks: %d  Sends: %d  Tempo: %s",
-    track_count,
-    send_count,
-    tostring(project.tempo or "?")
-  )
+  summarize_project(payload.project or {})
 end
 
 local function preview_prompt()
+  if state.instance_read_only then
+    state.last_result = "This panel instance is read-only because another panel is active."
+    return
+  end
   if state.prompt == "" then
     state.last_result = "Enter a prompt first."
     return
   end
   append_log("preview_click instance=" .. PANEL_INSTANCE_ID .. " prompt=" .. tostring(state.prompt))
-  local ok, payload = api_request("POST", "/plan", {prompt = state.prompt})
+  local request_payload = {
+    prompt = state.prompt,
+  }
+  if next(state.clarification_answers) ~= nil then
+    request_payload.clarification_answers = state.clarification_answers
+  end
+  local ok, payload = api_request(
+    "POST",
+    "/plan",
+    request_payload
+  )
   if not ok then
     local message = type(payload) == "table" and payload.detail or payload
     state.last_result = "Preview failed: " .. tostring(message)
     append_log("preview_failed instance=" .. PANEL_INSTANCE_ID .. " detail=" .. tostring(message))
     return
   end
+  if payload.requires_clarification and payload.clarification then
+    state.plan_id = nil
+    state.plan_summary = payload.summary or "Clarification needed."
+    state.plan_steps = {}
+    state.clarification_id = payload.clarification.id
+    state.clarification_question = payload.clarification.question
+    state.clarification_options = payload.clarification.options or {}
+    state.last_result = "Clarification needed before preview can continue."
+    append_log("preview_clarification instance=" .. PANEL_INSTANCE_ID .. " clarification_id=" .. tostring(state.clarification_id))
+    return
+  end
+  clear_clarification()
   state.plan_id = payload.plan_id
   state.plan_summary = payload.summary or "No summary."
   state.plan_steps = payload.steps or {}
@@ -576,13 +689,30 @@ local function preview_prompt()
   append_log("preview_ready instance=" .. PANEL_INSTANCE_ID .. " plan_id=" .. tostring(state.plan_id))
 end
 
+local function answer_clarification(value)
+  if not state.clarification_id then
+    return
+  end
+  state.clarification_answers[state.clarification_id] = tostring(value)
+  state.last_result = "Clarification answered. Refreshing preview..."
+  preview_prompt()
+end
+
 local function apply_plan()
+  if state.instance_read_only then
+    state.last_result = "This panel instance is read-only because another panel is active."
+    return
+  end
   if state.apply_pending then
     state.last_result = "Apply already in progress."
     return
   end
   if not state.plan_id then
-    state.last_result = "Preview a plan first."
+    if state.clarification_id then
+      state.last_result = "Answer the clarification first."
+    else
+      state.last_result = "Preview a plan first."
+    end
     append_log("apply_blocked_missing_plan instance=" .. PANEL_INSTANCE_ID)
     return
   end
@@ -594,12 +724,19 @@ local function apply_plan()
   end
   state.apply_pending = true
   state.last_result = "Apply started. Waiting for REAPER bridge..."
+  state.apply_summary = "Apply in progress."
+  state.apply_result_lines = {"Waiting for bridge execution results..."}
+  state.verification_summary = "Verification pending."
+  state.verification_result_lines = {"Waiting for refreshed project state..."}
+  state.mismatch_lines = {}
 end
 
 local function prompt_for_input()
   local ok, value = reaper.GetUserInputs("ReaperGPT Prompt", 1, "Prompt:", state.prompt)
   if ok then
     state.prompt = value
+    state.clarification_answers = {}
+    clear_clarification()
   end
 end
 
@@ -648,13 +785,148 @@ local function draw_wrapped_text(text, x, y, width, line_height, max_lines)
   end
 end
 
+append_line = function(lines, text)
+  if text == nil then
+    return
+  end
+  lines[#lines + 1] = tostring(text)
+end
+
+local function bool_label(value)
+  if value then
+    return "yes"
+  end
+  return "no"
+end
+
+local function track_ref_label(ref)
+  if type(ref) ~= "table" then
+    return "?"
+  end
+  if ref.value ~= nil then
+    return tostring(ref.value)
+  end
+  return "?"
+end
+
+summarize_project = function(project)
+  local track_count = #(project.tracks or {})
+  local send_count = #(project.sends or {})
+  local selected_count = #(project.selected_track_ids or {})
+  local marker_count = #(project.markers or {})
+  local region_count = #(project.regions or {})
+  state.project_summary = string.format(
+    "%s | Tempo %s | Tracks %d | Sends %d | Selected %d",
+    tostring(project.name or "Unknown project"),
+    tostring(project.tempo or "?"),
+    track_count,
+    send_count,
+    selected_count
+  )
+
+  local detail_lines = {}
+  append_line(detail_lines, string.format("Markers %d | Regions %d | Bridge %s", marker_count, region_count, bool_label(project.bridge_connected)))
+
+  local selected_names = {}
+  for _, track in ipairs(project.selection and project.selection.tracks or {}) do
+    selected_names[#selected_names + 1] = tostring(track.name or track.id or "?")
+  end
+  if #selected_names > 0 then
+    append_line(detail_lines, "Selected tracks: " .. table.concat(selected_names, ", "))
+  end
+
+  local folder_names = {}
+  for _, track in ipairs(project.folder_structure or {}) do
+    if track.is_folder_parent then
+      folder_names[#folder_names + 1] = tostring(track.name or track.id or "?")
+    end
+  end
+  if #folder_names > 0 then
+    append_line(detail_lines, "Folders: " .. table.concat(folder_names, ", "))
+  end
+
+  local bus_names = {}
+  for _, track in ipairs(project.tracks or {}) do
+    if track.is_bus then
+      bus_names[#bus_names + 1] = tostring(track.name or track.id or "?")
+    end
+  end
+  if #bus_names > 0 then
+    append_line(detail_lines, "Buses: " .. table.concat(bus_names, ", "))
+  end
+
+  state.project_detail_lines = detail_lines
+end
+
+format_step_result_line = function(result)
+  local prefix = string.format("%d. [%s] %s", tonumber(result.index or 0) + 1, tostring(result.status or "?"), tostring(result.tool or "unknown"))
+  local detail = result.detail
+  if type(detail) ~= "table" then
+    if detail ~= nil then
+      return prefix .. " - " .. tostring(detail)
+    end
+    return prefix
+  end
+  if result.tool == "create_track" or result.tool == "create_bus" then
+    return prefix .. " - track_id " .. tostring(detail.track_id or "?")
+  end
+  if result.tool == "create_send" then
+    return prefix .. " - send_index " .. tostring(detail.send_index or "?")
+  end
+  if result.tool == "insert_fx" then
+    return prefix .. " - " .. tostring(detail.fx_name or "?") .. " @ fx_index " .. tostring(detail.fx_index or "?")
+  end
+  if result.tool == "project.set_tempo" then
+    return prefix .. " - tempo " .. tostring(detail.tempo or "?")
+  end
+  return prefix
+end
+
+format_verification_line = function(item)
+  local status = item.ok and "PASS" or "FAIL"
+  local line = string.format("%d. [%s] %s", tonumber(item.index or 0) + 1, status, tostring(item.check or "check"))
+  local expected = item.expected
+  if type(expected) == "table" then
+    if item.check == "track_created" or item.check == "bus_created" then
+      line = line .. " - " .. tostring(expected.name or expected.track_id or "?")
+    elseif item.check == "send_exists" then
+      line = line .. " - " .. track_ref_label(expected.src) .. " -> " .. track_ref_label(expected.dst)
+    elseif item.check == "fx_inserted" then
+      line = line .. " - " .. tostring(expected.fx_name or "?") .. " on " .. track_ref_label(expected.track_ref)
+    elseif item.check == "tempo_changed" then
+      line = line .. " - " .. tostring(expected.bpm or "?") .. " BPM"
+    end
+  end
+  if not item.ok and item.message then
+    line = line .. " - " .. tostring(item.message)
+  end
+  return line
+end
+
+draw_text_lines = function(lines, x, y, width, line_height, max_lines)
+  local line_y = y
+  local rendered = 0
+  for _, line in ipairs(lines or {}) do
+    if rendered >= max_lines then
+      break
+    end
+    draw_wrapped_text(line, x, line_y, width, line_height, 2)
+    line_y = line_y + (line_height * 2)
+    rendered = rendered + 1
+  end
+end
+
 local function render()
   gfx.set(0.08, 0.09, 0.11, 1)
   gfx.rect(0, 0, gfx.w, gfx.h, true)
   gfx.setfont(1, "Arial", 16)
 
   if draw_button(16, 16, 110, 32, "Prompt...") then
-    prompt_for_input()
+    if state.instance_read_only then
+      state.last_result = "This panel instance is read-only because another panel is active."
+    else
+      prompt_for_input()
+    end
   end
   if draw_button(136, 16, 110, 32, "Preview") then
     preview_prompt()
@@ -663,7 +935,11 @@ local function render()
     apply_plan()
   end
   if draw_button(376, 16, 110, 32, "Refresh") then
-    update_project_summary()
+    if state.instance_read_only then
+      state.last_result = "This panel instance is read-only because another panel is active."
+    else
+      update_project_summary()
+    end
   end
 
   draw_section_title("Prompt", 64)
@@ -684,19 +960,49 @@ local function render()
   gfx.x = 16
   gfx.y = 250
   gfx.drawstr("Plan ID: " .. tostring(state.plan_id or "none"))
-  for index = 1, math.min(#state.plan_steps, 8) do
-    gfx.x = 16
-    gfx.y = 274 + ((index - 1) * 18)
-    gfx.drawstr(string.format("%d. %s", index, format_step(state.plan_steps[index])))
+  if state.clarification_id and state.clarification_question then
+    draw_wrapped_text(state.clarification_question, 16, 274, gfx.w - 32, 18, 3)
+    for index = 1, math.min(#state.clarification_options, 4) do
+      local option = state.clarification_options[index] or {}
+      local label = tostring(option.label or option.value or ("Option " .. tostring(index)))
+      if draw_button(16, 334 + ((index - 1) * 40), gfx.w - 32, 32, label) then
+        answer_clarification(option.value or label)
+      end
+    end
+  else
+    for index = 1, math.min(#state.plan_steps, 8) do
+      gfx.x = 16
+      gfx.y = 274 + ((index - 1) * 18)
+      gfx.drawstr(string.format("%d. %s", index, format_step(state.plan_steps[index])))
+    end
   end
 
-  draw_section_title("Project", 430)
+  draw_section_title("Apply Results", 430)
   gfx.set(1, 1, 1, 1)
-  draw_wrapped_text(state.project_summary, 16, 454, gfx.w - 32, 18, 2)
+  draw_wrapped_text(state.apply_summary, 16, 454, gfx.w - 32, 18, 2)
+  draw_text_lines(state.apply_result_lines, 16, 492, gfx.w - 32, 18, 4)
 
-  draw_section_title("Last Result", 498)
+  draw_section_title("Verification", 646)
   gfx.set(1, 1, 1, 1)
-  draw_wrapped_text(state.last_result, 16, 522, gfx.w - 32, 18, 3)
+  draw_wrapped_text(state.verification_summary, 16, 670, gfx.w - 32, 18, 2)
+  draw_text_lines(state.verification_result_lines, 16, 708, gfx.w - 32, 18, 4)
+
+  draw_section_title("Mismatches", 862)
+  gfx.set(1, 1, 1, 1)
+  if #state.mismatch_lines > 0 then
+    draw_text_lines(state.mismatch_lines, 16, 886, gfx.w - 32, 18, 3)
+  else
+    draw_wrapped_text("No mismatches reported.", 16, 886, gfx.w - 32, 18, 2)
+  end
+
+  draw_section_title("Final Project", 1004)
+  gfx.set(1, 1, 1, 1)
+  draw_wrapped_text(state.project_summary, 16, 1028, gfx.w - 32, 18, 2)
+  draw_text_lines(state.project_detail_lines, 16, 1066, gfx.w - 32, 18, 4)
+
+  draw_section_title("Status", 1210)
+  gfx.set(1, 1, 1, 1)
+  draw_wrapped_text(state.last_result, 16, 1234, gfx.w - 32, 18, 3)
 end
 
 local function main()
@@ -706,6 +1012,7 @@ local function main()
     return
   end
   poll_apply_result()
+  heartbeat_active_instance()
   render()
   mouse.down = gfx.mouse_cap & 1 == 1
   gfx.update()
@@ -714,6 +1021,6 @@ end
 
 reaper.RecursiveCreateDirectory(DATA_DIR, 0)
 write_active_instance()
-gfx.init("ReaperGPT Panel", 640, 620)
+gfx.init("ReaperGPT Panel", 640, 1320)
 update_project_summary()
 main()

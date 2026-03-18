@@ -66,6 +66,7 @@ class ReaperBridgeClient:
 
     def execute_plan(self, steps: list[PlanStep]) -> dict[str, Any]:
         request_id = str(uuid.uuid4())
+        self._clear_stale_request()
         self._clear_stale_result(request_id=request_id)
         payload = {
             "request_id": request_id,
@@ -87,6 +88,19 @@ class ReaperBridgeClient:
         if payload.get("request_id") != request_id:
             result_path.unlink(missing_ok=True)
 
+    def _clear_stale_request(self) -> None:
+        request_path = self._settings.bridge_request_path
+        if not request_path.exists():
+            return
+        try:
+            payload = self._read_json(request_path)
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            request_path.unlink(missing_ok=True)
+            return
+        created_at = float(payload.get("created_at", 0.0) or 0.0)
+        if created_at <= 0.0 or (time.time() - created_at) > self._settings.bridge_timeout_seconds:
+            request_path.unlink(missing_ok=True)
+
     def _wait_for_result(self, request_id: str) -> dict[str, Any]:
         deadline = time.monotonic() + self._settings.bridge_timeout_seconds
         result_path = self._settings.bridge_result_path
@@ -98,6 +112,8 @@ class ReaperBridgeClient:
                     time.sleep(self._settings.bridge_poll_interval_ms / 1000.0)
                     continue
                 if payload.get("request_id") != request_id:
+                    if time.time() - float(payload.get("created_at", 0.0) or 0.0) > self._settings.bridge_timeout_seconds:
+                        result_path.unlink(missing_ok=True)
                     time.sleep(self._settings.bridge_poll_interval_ms / 1000.0)
                     continue
                 return payload

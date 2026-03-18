@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     bridge_state_filename: str = Field("project_state.json")
     bridge_poll_interval_ms: int = Field(200)
     bridge_timeout_seconds: float = Field(10.0)
+    saved_plan_ttl_seconds: float = Field(300.0)
 
     model_config = ConfigDict(
         env_file=".env",
