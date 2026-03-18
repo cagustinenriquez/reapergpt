@@ -1,70 +1,74 @@
 from __future__ import annotations
 
-import os
-from functools import lru_cache
 from pathlib import Path
+from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+from pydantic import ConfigDict, Field, field_validator
+from pydantic_settings import BaseSettings
 
 
-class Settings(BaseModel):
-    model_config = ConfigDict(frozen=True)
+class Settings(BaseSettings):
+    llm_provider: str = Field("heuristic")
+    llm_allow_heuristic_fallback: bool = Field(True)
+    llm_timeout_seconds: int = Field(10)
+    debug: bool = Field(False)
+    bridge_mode: str = Field("file")
+    bridge_root: Path = Field(Path("data") / "reaper_bridge")
+    bridge_request_filename: str = Field("pending_plan.json")
+    bridge_result_filename: str = Field("execution_result.json")
+    bridge_state_filename: str = Field("project_state.json")
+    bridge_poll_interval_ms: int = Field(200)
+    bridge_timeout_seconds: float = Field(10.0)
 
-    host: str = Field(default="127.0.0.1")
-    port: int = Field(default=8000, ge=1, le=65535)
-    debug: bool = Field(default=True)
-    reaper_bridge_transport: str = Field(default="dry_run")
-    reaper_bridge_url: str = Field(default="http://127.0.0.1:8765")
-    bridge_dry_run: bool = Field(default=True)
-    reaper_bridge_dir: str = Field(default="")
-    llm_provider: str = Field(default="none")
-    ollama_base_url: str = Field(default="http://127.0.0.1:11434")
-    ollama_model: str = Field(default="qwen2.5:7b-instruct")
-    llm_timeout_seconds: float = Field(default=20.0, gt=0)
-    llm_allow_heuristic_fallback: bool = Field(default=True)
-    plan_session_store_path: str = Field(default="")
-    profile_store_path: str = Field(default="")
+    model_config = ConfigDict(
+        env_file=".env",
+        env_prefix="REAPERGPT_",
+        extra="ignore",
+        frozen=True,
+    )
 
+    @field_validator("debug", mode="before")
     @classmethod
-    def from_env(cls) -> "Settings":
-        default_bridge_dir = ""
-        appdata = os.getenv("APPDATA")
-        if appdata:
-            default_bridge_dir = str(Path(appdata) / "REAPER" / "ReaperGPTBridge")
-        default_session_store = ""
-        if appdata:
-            default_session_store = str(Path(appdata) / "ReaperGPTCompanion" / "plan_sessions.json")
-        default_profile_store = ""
-        if appdata:
-            default_profile_store = str(Path(appdata) / "ReaperGPTCompanion" / "profile.json")
+    def _normalize_debug(cls, value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            return normalized not in {"false", "0", "no", "off", "", "release"}
+        return bool(value)
 
-        return cls(
-            host=os.getenv("REAPERGPT_HOST", "127.0.0.1"),
-            port=int(os.getenv("REAPERGPT_PORT", "8000")),
-            debug=_env_bool("REAPERGPT_DEBUG", True),
-            reaper_bridge_transport=os.getenv("REAPERGPT_REAPER_BRIDGE_TRANSPORT", "dry_run"),
-            reaper_bridge_url=os.getenv(
-                "REAPERGPT_REAPER_BRIDGE_URL", "http://127.0.0.1:8765"
-            ),
-            bridge_dry_run=_env_bool("REAPERGPT_BRIDGE_DRY_RUN", True),
-            reaper_bridge_dir=os.getenv("REAPERGPT_REAPER_BRIDGE_DIR", default_bridge_dir),
-            llm_provider=os.getenv("REAPERGPT_LLM_PROVIDER", "none"),
-            ollama_base_url=os.getenv("REAPERGPT_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
-            ollama_model=os.getenv("REAPERGPT_OLLAMA_MODEL", "qwen2.5:7b-instruct"),
-            llm_timeout_seconds=float(os.getenv("REAPERGPT_LLM_TIMEOUT_SECONDS", "20")),
-            llm_allow_heuristic_fallback=_env_bool("REAPERGPT_LLM_ALLOW_HEURISTIC_FALLBACK", True),
-            plan_session_store_path=os.getenv("REAPERGPT_PLAN_SESSION_STORE_PATH", default_session_store),
-            profile_store_path=os.getenv("REAPERGPT_PROFILE_STORE_PATH", default_profile_store),
-        )
+    @field_validator("bridge_root", mode="before")
+    @classmethod
+    def _normalize_bridge_root(cls, value: object) -> Path:
+        if isinstance(value, Path):
+            return value
+        if isinstance(value, str) and value.strip():
+            return Path(value.strip())
+        return Path("data") / "reaper_bridge"
+
+    @property
+    def bridge_request_path(self) -> Path:
+        return self.bridge_root / self.bridge_request_filename
+
+    @property
+    def bridge_result_path(self) -> Path:
+        return self.bridge_root / self.bridge_result_filename
+
+    @property
+    def bridge_state_path(self) -> Path:
+        return self.bridge_root / self.bridge_state_filename
 
 
-@lru_cache(maxsize=1)
+_settings: Optional[Settings] = None
+
+
 def get_settings() -> Settings:
-    return Settings.from_env()
+    global _settings
+    if _settings is None:
+        _settings = Settings()
+    return _settings
+
+
+def reset_settings() -> None:
+    global _settings
+    _settings = None
