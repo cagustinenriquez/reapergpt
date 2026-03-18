@@ -1,9 +1,38 @@
-local SCRIPT_PATH = debug.getinfo(1, "S").source:match("@?(.*[\\/])")
-local REPO_ROOT = SCRIPT_PATH .. "..\\"
-local BRIDGE_DIR = REPO_ROOT .. "data\\reaper_bridge\\"
+local function normalize_path(path)
+  local normalized = path:gsub("/", "\\")
+  local prefix = normalized:match("^%a:[\\]") or normalized:match("^\\\\[^\\]+\\[^\\]+\\")
+  local is_absolute = prefix ~= nil
+  local body = normalized
+  if prefix then
+    body = normalized:sub(#prefix + 1)
+  end
+  local parts = {}
+  for part in body:gmatch("[^\\]+") do
+    if part == ".." then
+      if #parts > 0 then
+        table.remove(parts)
+      end
+    elseif part ~= "." and part ~= "" then
+      parts[#parts + 1] = part
+    end
+  end
+  local joined = table.concat(parts, "\\")
+  if is_absolute and prefix then
+    if joined == "" then
+      return prefix:gsub("\\$", "")
+    end
+    return prefix .. joined
+  end
+  return joined
+end
+
+local SCRIPT_DIR = normalize_path(debug.getinfo(1, "S").source:match("@?(.*[\\/])") or ".\\")
+local REPO_ROOT = normalize_path(SCRIPT_DIR .. "\\..\\")
+local BRIDGE_DIR = normalize_path(REPO_ROOT .. "\\data\\reaper_bridge\\") .. "\\"
 local REQUEST_PATH = BRIDGE_DIR .. "pending_plan.json"
 local RESULT_PATH = BRIDGE_DIR .. "execution_result.json"
 local STATE_PATH = BRIDGE_DIR .. "project_state.json"
+local LOG_PATH = normalize_path(REPO_ROOT .. "\\data\\reaper_bridge_debug.log")
 
 local COLOR_MAP = {
   red = {255, 80, 80},
@@ -18,6 +47,15 @@ local COLOR_MAP = {
 }
 
 local json = {}
+
+local function append_log(message)
+  local stamp = os.date("%Y-%m-%d %H:%M:%S")
+  local handle = io.open(LOG_PATH, "a")
+  if handle then
+    handle:write(string.format("[%s] %s\n", stamp, tostring(message)))
+    handle:close()
+  end
+end
 
 local function json_error(message, position)
   error(string.format("JSON parse error at %d: %s", position or -1, message))
@@ -241,7 +279,7 @@ function json.encode(value)
 end
 
 local function ensure_dir(path)
-  reaper.RecursiveCreateDirectory(path, 0)
+  return reaper.RecursiveCreateDirectory(path, 0)
 end
 
 local function read_file(path)
@@ -255,9 +293,14 @@ local function read_file(path)
 end
 
 local function write_file(path, content)
-  local handle = assert(io.open(path, "w"))
+  local handle, err = io.open(path, "w")
+  if not handle then
+    append_log("write_file failed for " .. path .. ": " .. tostring(err))
+    error("unable to open file for write: " .. path .. " (" .. tostring(err) .. ")")
+  end
   handle:write(content)
   handle:close()
+  append_log("write_file ok: " .. path)
 end
 
 local function write_json(path, payload)
@@ -408,9 +451,10 @@ local function collect_state()
       }
     end
   end
+  local _, project_name = reaper.GetProjectName(0, "")
   return {
     bridge_connected = true,
-    project_name = reaper.GetProjectName(0, "") or "REAPER Project",
+    project_name = project_name ~= "" and project_name or "REAPER Project",
     tempo = reaper.Master_GetTempo(),
     tracks = tracks,
     sends = sends,
@@ -471,8 +515,10 @@ local function process_request()
   if not raw or raw == "" then
     return
   end
+  append_log("request file detected")
   local ok, request = pcall(json.decode, raw)
   if not ok then
+    append_log("json decode failed: " .. tostring(request))
     write_json(RESULT_PATH, {
       request_id = "unknown",
       status = "error",
@@ -483,18 +529,22 @@ local function process_request()
     return
   end
   if request.request_id == last_request_id then
+    append_log("duplicate request ignored: " .. tostring(request.request_id))
     return
   end
   last_request_id = request.request_id
+  append_log("executing request: " .. tostring(request.request_id))
   local result = execute_plan(request)
   write_json(RESULT_PATH, result)
   write_json(STATE_PATH, collect_state())
   os.remove(REQUEST_PATH)
+  append_log("request completed: " .. tostring(request.request_id))
 end
 
 local function loop()
   local ok, err = pcall(process_request)
   if not ok then
+    append_log("loop error: " .. tostring(err))
     write_json(RESULT_PATH, {
       request_id = last_request_id or "unknown",
       status = "error",
@@ -506,5 +556,9 @@ local function loop()
 end
 
 ensure_dir(BRIDGE_DIR)
+append_log("script_dir=" .. SCRIPT_DIR)
+append_log("repo_root=" .. REPO_ROOT)
+append_log("bridge_dir=" .. BRIDGE_DIR)
 write_json(STATE_PATH, collect_state())
+append_log("initial state written")
 loop()
