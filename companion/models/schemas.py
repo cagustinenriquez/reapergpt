@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class PlanStep(BaseModel):
@@ -20,11 +20,21 @@ class PlanResponse(BaseModel):
     summary: str = ''
     source: str = 'heuristic'
     requires_confirmation: bool = False
+    plan_id: str | None = None
     steps: list[PlanStep] = Field(default_factory=list)
 
 
 class ExecutePlanRequest(BaseModel):
-    steps: list[PlanStep] = Field(default_factory=list)
+    steps: list[PlanStep] | None = None
+    plan_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_reference(self) -> "ExecutePlanRequest":
+        has_steps = bool(self.steps)
+        has_plan_id = bool(self.plan_id)
+        if has_steps == has_plan_id:
+            raise ValueError("provide exactly one of steps or plan_id")
+        return self
 
 
 class StepResult(BaseModel):

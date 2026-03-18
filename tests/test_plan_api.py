@@ -118,6 +118,7 @@ def test_plan_endpoint_builds_drum_bus_plan_from_bridge_state(bridge_cleanup):
     body = response.json()
     assert body["ok"] is True
     assert body["source"] == "heuristic"
+    assert body["plan_id"] is not None
     assert body["steps"][0]["tool"] == "create_bus"
     assert any(step["tool"] == "create_send" for step in body["steps"])
 
@@ -212,6 +213,124 @@ def test_execute_plan_round_trips_through_file_bridge(bridge_cleanup):
     assert body["executed_steps"] == 3
     assert body["failed_step_index"] is None
     assert body["final_project_state"]["tracks"][0]["name"] == "Demo Track"
+
+
+def test_execute_plan_combined_scenario_round_trips_through_file_bridge(bridge_cleanup):
+    settings = _bridge_settings("execute_combined")
+    bridge_cleanup(settings.bridge_root)
+    app.dependency_overrides[get_settings] = lambda: settings
+    client = TestClient(app)
+    worker = _simulate_reaper(
+        settings,
+        state_payload={
+            "project_name": "Combined Session",
+            "tempo": 120.0,
+            "tracks": [
+                {"id": 1, "name": "Demo Track", "fx": ["VST: ReaEQ (Cockos)"], "color": None},
+                {"id": 2, "name": "Demo Bus", "fx": [], "color": None},
+            ],
+            "sends": [{"src": 1, "dst": 2}],
+            "bridge_connected": True,
+        },
+        result_builder=lambda request: {
+            "request_id": request["request_id"],
+            "status": "ok",
+            "results": [
+                {"index": 0, "tool": "create_track", "status": "accepted", "output": {"track_id": 1}},
+                {"index": 1, "tool": "create_bus", "status": "accepted", "output": {"track_id": 2}},
+                {"index": 2, "tool": "create_send", "status": "accepted", "output": {"send_index": 0}},
+                {"index": 3, "tool": "insert_fx", "status": "accepted", "output": {"fx_index": 0, "fx_name": "ReaEQ"}},
+            ],
+        },
+    )
+
+    response = client.post(
+        "/execute-plan",
+        json={
+            "steps": [
+                {"tool": "create_track", "args": {"name": "Demo Track"}},
+                {"tool": "create_bus", "args": {"name": "Demo Bus"}},
+                {
+                    "tool": "create_send",
+                    "args": {
+                        "src": {"type": "track_name", "value": "Demo Track"},
+                        "dst": {"type": "track_name", "value": "Demo Bus"},
+                    },
+                },
+                {
+                    "tool": "insert_fx",
+                    "args": {
+                        "track_ref": {"type": "track_name", "value": "Demo Track"},
+                        "fx_name": "ReaEQ",
+                    },
+                },
+            ]
+        },
+    )
+    worker.join(timeout=2.0)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["executed_steps"] == 4
+    assert [item["tool"] for item in body["results"]] == [
+        "create_track",
+        "create_bus",
+        "create_send",
+        "insert_fx",
+    ]
+    assert body["final_project_state"]["sends"] == [{"src": 1, "dst": 2}]
+    assert body["final_project_state"]["tracks"][0]["fx"] == ["VST: ReaEQ (Cockos)"]
+
+
+def test_plan_id_preview_can_be_executed_later(bridge_cleanup):
+    settings = _bridge_settings("plan_id")
+    bridge_cleanup(settings.bridge_root)
+    _write_json(
+        settings.bridge_state_path,
+        {
+            "project_name": "Plan Session",
+            "tempo": 120.0,
+            "tracks": [],
+            "sends": [],
+            "bridge_connected": True,
+        },
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    client = TestClient(app)
+
+    preview = client.post("/plan", json={"prompt": "tempo 132"})
+    assert preview.status_code == 200
+    preview_body = preview.json()
+    assert preview_body["plan_id"] is not None
+    assert preview_body["steps"][0]["tool"] == "project.set_tempo"
+
+    worker = _simulate_reaper(
+        settings,
+        state_payload={
+            "project_name": "Plan Session",
+            "tempo": 132.0,
+            "tracks": [],
+            "sends": [],
+            "bridge_connected": True,
+        },
+        result_builder=lambda request: {
+            "request_id": request["request_id"],
+            "status": "ok",
+            "results": [
+                {"index": 0, "tool": "project.set_tempo", "status": "accepted", "output": {"tempo": 132}},
+            ],
+        },
+    )
+
+    response = client.post("/execute-plan", json={"plan_id": preview_body["plan_id"]})
+    worker.join(timeout=2.0)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["results"][0]["tool"] == "project.set_tempo"
+    assert body["final_project_state"]["tempo"] == 132.0
 
 
 def test_execute_plan_returns_bridge_failure_details(bridge_cleanup):

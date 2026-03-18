@@ -1,0 +1,1 @@
+{"success":true,"results":[{"index":0,"tool":"project.set_tempo","status":"accepted","detail":{"tempo":80.0}}],"executed_steps":1,"failed_step_index":null,"final_project_state":{"project_name":"REAPER Project","tempo":80.0,"tracks":[],"sends":[],"bridge_connected":true},"project_state_error":null}

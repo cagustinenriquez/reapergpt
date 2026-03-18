@@ -17,6 +17,7 @@ ALLOWED_TOOLS: dict[str, set[str]] = {
     'transport.stop': set(),
     'project.set_tempo': {'bpm'},
     'track.set_color': {'color'},
+    'set_track_color': {'color'},
 }
 
 

@@ -39,16 +39,25 @@ Supported tools in the current REAPER bridge:
 
 Start REAPER, run [reapergpt_file_bridge.lua](/c:/Users/cenriquez/Desktop/reapergpt/reaper_bridge/reapergpt_file_bridge.lua) from the Action List, and keep it running while the API is up.
 
+For a minimal preview/apply UI, also run [reapergpt_panel.lua](/c:/Users/cenriquez/Desktop/reapergpt/reaper_bridge/reapergpt_panel.lua). It opens a small `gfx` window with:
+
+- `Prompt...`: capture the natural-language request
+- `Preview`: call `/plan` and store the returned `plan_id`
+- `Apply`: call `/execute-plan` with the saved `plan_id`
+- `Refresh`: reload `/state/project`
+
+The panel uses `curl.exe` to talk to the local API and writes a small log to [reaper_panel.log](/c:/Users/cenriquez/Desktop/reapergpt/data/reaper_panel.log).
+
 ## API endpoints
 
 - `GET /health`: Returns planner configuration so the UI knows whether heuristic fallback is enabled.
 - `GET /state/project`: Returns the latest snapshot from `project_state.json`.
-- `POST /plan`: Accepts `{ "prompt": "...", "state": { ... } }` and returns a `PlanResponse` with a summary, source, and steps. Currently implemented heuristics cover:
+- `POST /plan`: Accepts `{ "prompt": "...", "state": { ... } }` and returns a preview with a `plan_id`, summary, source, and steps. Currently implemented heuristics cover:
   - Drum bus creation (detects Kick/Snare/Drum names in the provided `state`).
   - Vocal session template (creates Lead Vocal, double tracks, buses, FX, and routing).
   - Transport control (`play` / `stop`).
   - Tempo adjustments (`tempo 128`).
-- `POST /execute-plan`: Writes the validated plan to `pending_plan.json`, waits for `execution_result.json`, and then returns the execution results plus the refreshed project state.
+- `POST /execute-plan`: Accepts either `{"steps":[...]}` for direct execution or `{"plan_id":"..."}` to apply a previously previewed plan. It writes the validated plan to `pending_plan.json`, waits for `execution_result.json`, and then returns the execution results plus the refreshed project state.
 
 Example request:
 
@@ -64,6 +73,7 @@ Example response:
 ```json
 {
   "ok": true,
+  "plan_id": "0b4d4c54-2afe-43c2-82de-6da2c8f49f0b",
   "summary": "Create a vocal session template with buses, FX, and routing.",
   "source": "heuristic",
   "steps": [
@@ -74,7 +84,7 @@ Example response:
 }
 ```
 
-Once `/plan` returns a step list, POST the same payload to `/execute-plan` to exercise the bridge and get the final state snapshot for rendering inside the REAPER UI.
+Once `/plan` returns a preview, either POST the returned `steps` directly to `/execute-plan` or POST just the `plan_id` to apply the saved preview.
 
 Example:
 
@@ -95,6 +105,20 @@ Invoke-RestMethod -Method Post `
       }
     ]
   }'
+```
+
+Preview/apply with a saved `plan_id`:
+
+```powershell
+$preview = Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8000/plan `
+  -ContentType "application/json" `
+  -Body '{"prompt":"tempo 132"}'
+
+Invoke-RestMethod -Method Post `
+  -Uri http://127.0.0.1:8000/execute-plan `
+  -ContentType "application/json" `
+  -Body "{`"plan_id`":`"$($preview.plan_id)`"}"
 ```
 
 ## Testing

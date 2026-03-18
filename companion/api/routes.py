@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,6 +17,7 @@ from companion.models.schemas import (
 )
 
 router = APIRouter()
+_saved_plans: dict[str, list[PlanStep]] = {}
 
 
 def get_reaper_client(settings: Settings = Depends(get_settings)) -> ReaperBridgeClient:
@@ -76,6 +78,10 @@ def plan_endpoint(
             requires_confirmation=response.requires_confirmation,
             steps=[],
         )
+    if response.steps:
+        plan_id = str(uuid.uuid4())
+        _saved_plans[plan_id] = list(response.steps)
+        response = response.model_copy(update={"plan_id": plan_id})
     return response
 
 
@@ -84,14 +90,19 @@ def execute_plan(
     payload: ExecutePlanRequest,
     client: ReaperBridgeClient = Depends(get_reaper_client),
 ) -> ExecutePlanResponse:
-    if not payload.steps:
+    steps = payload.steps
+    if payload.plan_id:
+        steps = _saved_plans.get(payload.plan_id)
+        if not steps:
+            raise HTTPException(status_code=404, detail=f"unknown plan_id '{payload.plan_id}'")
+    if not steps:
         raise HTTPException(status_code=400, detail="plan must include at least one step")
-    errors = validate_plan_steps(payload.steps)
+    errors = validate_plan_steps(steps)
     if errors:
         raise HTTPException(status_code=400, detail="; ".join(errors))
 
     try:
-        bridge_result = client.execute_plan(payload.steps)
+        bridge_result = client.execute_plan(steps)
     except ActionExecutionError as exc:
         return ExecutePlanResponse(
             success=False,
@@ -105,7 +116,7 @@ def execute_plan(
         if not isinstance(item, dict):
             continue
         result_index = int(item.get("index", idx))
-        tool = str(item.get("tool", payload.steps[result_index].tool if result_index < len(payload.steps) else "unknown"))
+        tool = str(item.get("tool", steps[result_index].tool if result_index < len(steps) else "unknown"))
         status = str(item.get("status", "unknown"))
         detail = item.get("output") if "output" in item else item.get("detail")
         results.append(StepResult(index=result_index, tool=tool, status=status, detail=detail))
