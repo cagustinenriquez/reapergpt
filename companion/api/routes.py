@@ -49,13 +49,19 @@ def project_state(client: ReaperBridgeClient = Depends(get_reaper_client)) -> di
         "ok": True,
         "mode": client.mode,
         "project": {
+            "name": state["project_name"],
             "tracks": state["tracks"],
             "sends": state["sends"],
+            "receives": state.get("receives", []),
             "tempo": state["tempo"],
-            "markers": [],
-            "regions": [],
-            "selection": {"tracks": [], "items": []},
-            "envelopes_summary": [],
+            "markers": state.get("markers", []),
+            "regions": state.get("regions", []),
+            "selection": state.get("selection", {"tracks": [], "items": []}),
+            "selected_track_ids": state.get("selected_track_ids", []),
+            "selected_item_count": state.get("selected_item_count", 0),
+            "folder_structure": state.get("folder_structure", []),
+            "envelopes_summary": state.get("envelopes_summary", []),
+            "bridge_connected": state.get("bridge_connected", False),
         },
     }
 

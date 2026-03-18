@@ -143,8 +143,55 @@ def test_project_state_snapshot_reads_bridge_file(bridge_cleanup):
         {
             "project_name": "Bridge Session",
             "tempo": 98.0,
-            "tracks": [{"id": 1, "name": "Bass", "fx": [], "color": None}],
+            "tracks": [
+                {
+                    "id": 1,
+                    "name": "Bass",
+                    "fx": ["VST: ReaEQ (Cockos)"],
+                    "fx_count": 1,
+                    "color": None,
+                    "selected": True,
+                    "sends": [{"index": 0, "src": 1, "dst": 2, "dst_name": "Bass Bus"}],
+                    "receives": [],
+                    "depth": 0,
+                    "parent_track_id": None,
+                    "folder_depth_delta": 1,
+                    "is_folder_parent": True,
+                    "has_parent_send": True,
+                    "is_bus": False,
+                },
+                {
+                    "id": 2,
+                    "name": "Bass Bus",
+                    "fx": [],
+                    "fx_count": 0,
+                    "color": None,
+                    "selected": False,
+                    "sends": [],
+                    "receives": [{"index": 0, "src": 1, "src_name": "Bass", "dst": 2}],
+                    "depth": 1,
+                    "parent_track_id": 1,
+                    "folder_depth_delta": -1,
+                    "is_folder_parent": False,
+                    "has_parent_send": True,
+                    "is_bus": True,
+                },
+            ],
             "sends": [{"src": 1, "dst": 2}],
+            "receives": [{"src": 1, "dst": 2}],
+            "markers": [{"id": 1, "name": "Verse", "start": 4.0}],
+            "regions": [{"id": 2, "name": "Chorus", "start": 8.0, "end": 16.0}],
+            "selected_track_ids": [1],
+            "selected_item_count": 1,
+            "folder_structure": [
+                {"id": 1, "name": "Bass", "parent_track_id": None, "depth": 0, "is_folder_parent": True, "is_bus": False},
+                {"id": 2, "name": "Bass Bus", "parent_track_id": 1, "depth": 1, "is_folder_parent": False, "is_bus": True},
+            ],
+            "selection": {
+                "tracks": [{"id": 1, "name": "Bass"}],
+                "items": [{"index": 1, "position": 1.0, "length": 2.0, "track_id": 1, "track_name": "Bass", "take_name": "Bass DI"}],
+            },
+            "envelopes_summary": [],
             "bridge_connected": True,
         },
     )
@@ -157,8 +204,20 @@ def test_project_state_snapshot_reads_bridge_file(bridge_cleanup):
     body = response.json()
     assert body["ok"] is True
     assert body["mode"] == "file"
+    assert body["project"]["name"] == "Bridge Session"
     assert body["project"]["tempo"] == 98.0
     assert body["project"]["tracks"][0]["name"] == "Bass"
+    assert body["project"]["tracks"][0]["fx"] == ["VST: ReaEQ (Cockos)"]
+    assert body["project"]["tracks"][0]["selected"] is True
+    assert body["project"]["tracks"][1]["receives"][0]["src_name"] == "Bass"
+    assert body["project"]["selection"]["tracks"] == [{"id": 1, "name": "Bass"}]
+    assert body["project"]["selection"]["items"][0]["take_name"] == "Bass DI"
+    assert body["project"]["selected_track_ids"] == [1]
+    assert body["project"]["selected_item_count"] == 1
+    assert body["project"]["markers"] == [{"id": 1, "name": "Verse", "start": 4.0}]
+    assert body["project"]["regions"] == [{"id": 2, "name": "Chorus", "start": 8.0, "end": 16.0}]
+    assert body["project"]["folder_structure"][1]["parent_track_id"] == 1
+    assert body["project"]["bridge_connected"] is True
 
 
 def test_execute_plan_round_trips_through_file_bridge(bridge_cleanup):
@@ -172,10 +231,18 @@ def test_execute_plan_round_trips_through_file_bridge(bridge_cleanup):
             "project_name": "Executed Session",
             "tempo": 120.0,
             "tracks": [
-                {"id": 1, "name": "Demo Track", "fx": [], "color": None},
-                {"id": 2, "name": "Demo Bus", "fx": [], "color": None},
+                {"id": 1, "name": "Demo Track", "fx": [], "color": None, "selected": False, "sends": [{"index": 0, "src": 1, "dst": 2, "dst_name": "Demo Bus"}], "receives": [], "depth": 0, "parent_track_id": None, "folder_depth_delta": 0, "is_folder_parent": False, "has_parent_send": True, "is_bus": False},
+                {"id": 2, "name": "Demo Bus", "fx": [], "color": None, "selected": False, "sends": [], "receives": [{"index": 0, "src": 1, "src_name": "Demo Track", "dst": 2}], "depth": 0, "parent_track_id": None, "folder_depth_delta": 0, "is_folder_parent": False, "has_parent_send": True, "is_bus": True},
             ],
             "sends": [{"src": 1, "dst": 2}],
+            "receives": [{"src": 1, "dst": 2}],
+            "markers": [],
+            "regions": [],
+            "selected_track_ids": [],
+            "selected_item_count": 0,
+            "folder_structure": [],
+            "selection": {"tracks": [], "items": []},
+            "envelopes_summary": [],
             "bridge_connected": True,
         },
         result_builder=lambda request: {
@@ -213,6 +280,7 @@ def test_execute_plan_round_trips_through_file_bridge(bridge_cleanup):
     assert body["executed_steps"] == 3
     assert body["failed_step_index"] is None
     assert body["final_project_state"]["tracks"][0]["name"] == "Demo Track"
+    assert body["final_project_state"]["tracks"][1]["is_bus"] is True
 
 
 def test_execute_plan_combined_scenario_round_trips_through_file_bridge(bridge_cleanup):
@@ -226,10 +294,18 @@ def test_execute_plan_combined_scenario_round_trips_through_file_bridge(bridge_c
             "project_name": "Combined Session",
             "tempo": 120.0,
             "tracks": [
-                {"id": 1, "name": "Demo Track", "fx": ["VST: ReaEQ (Cockos)"], "color": None},
-                {"id": 2, "name": "Demo Bus", "fx": [], "color": None},
+                {"id": 1, "name": "Demo Track", "fx": ["VST: ReaEQ (Cockos)"], "color": None, "selected": True, "sends": [{"index": 0, "src": 1, "dst": 2, "dst_name": "Demo Bus"}], "receives": [], "depth": 0, "parent_track_id": None, "folder_depth_delta": 0, "is_folder_parent": False, "has_parent_send": True, "is_bus": False},
+                {"id": 2, "name": "Demo Bus", "fx": [], "color": None, "selected": False, "sends": [], "receives": [{"index": 0, "src": 1, "src_name": "Demo Track", "dst": 2}], "depth": 0, "parent_track_id": None, "folder_depth_delta": 0, "is_folder_parent": False, "has_parent_send": True, "is_bus": True},
             ],
             "sends": [{"src": 1, "dst": 2}],
+            "receives": [{"src": 1, "dst": 2}],
+            "markers": [{"id": 1, "name": "Intro", "start": 0.0}],
+            "regions": [],
+            "selected_track_ids": [1],
+            "selected_item_count": 0,
+            "folder_structure": [{"id": 1, "name": "Demo Track", "parent_track_id": None, "depth": 0, "is_folder_parent": False, "is_bus": False}],
+            "selection": {"tracks": [{"id": 1, "name": "Demo Track"}], "items": []},
+            "envelopes_summary": [],
             "bridge_connected": True,
         },
         result_builder=lambda request: {
@@ -280,7 +356,9 @@ def test_execute_plan_combined_scenario_round_trips_through_file_bridge(bridge_c
         "insert_fx",
     ]
     assert body["final_project_state"]["sends"] == [{"src": 1, "dst": 2}]
+    assert body["final_project_state"]["receives"] == [{"src": 1, "dst": 2}]
     assert body["final_project_state"]["tracks"][0]["fx"] == ["VST: ReaEQ (Cockos)"]
+    assert body["final_project_state"]["selected_track_ids"] == [1]
 
 
 def test_plan_id_preview_can_be_executed_later(bridge_cleanup):

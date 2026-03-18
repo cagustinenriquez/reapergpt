@@ -38,6 +38,14 @@ class ReaperBridgeClient:
             "tempo": 120.0,
             "tracks": [],
             "sends": [],
+            "receives": [],
+            "markers": [],
+            "regions": [],
+            "selected_track_ids": [],
+            "selected_item_count": 0,
+            "folder_structure": [],
+            "selection": {"tracks": [], "items": []},
+            "envelopes_summary": [],
             "bridge_connected": False,
         }
 

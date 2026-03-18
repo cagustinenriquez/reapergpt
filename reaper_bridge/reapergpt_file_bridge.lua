@@ -422,42 +422,183 @@ local TOOL_MAP = {
   ["project.set_tempo"] = set_tempo,
 }
 
+local function track_id(track)
+  if not track then
+    return nil
+  end
+  return math.floor(reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER"))
+end
+
+local function track_name(track)
+  if not track then
+    return ""
+  end
+  local _, name = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
+  return name
+end
+
+local function collect_markers_and_regions()
+  local markers = {}
+  local regions = {}
+  local _, marker_count, region_count = reaper.CountProjectMarkers(0)
+  local total = marker_count + region_count
+  for index = 0, total - 1 do
+    local _, is_region, position, region_end, name, number = reaper.EnumProjectMarkers(index)
+    local entry = {
+      id = number,
+      name = name or "",
+      start = position,
+    }
+    if is_region then
+      entry["end"] = region_end
+      regions[#regions + 1] = entry
+    else
+      markers[#markers + 1] = entry
+    end
+  end
+  return markers, regions
+end
+
+local function collect_selected_items()
+  local items = {}
+  local selected_count = reaper.CountSelectedMediaItems(0)
+  for index = 0, selected_count - 1 do
+    local item = reaper.GetSelectedMediaItem(0, index)
+    local item_track = reaper.GetMediaItemTrack(item)
+    local active_take = reaper.GetActiveTake(item)
+    local take_name = ""
+    if active_take then
+      take_name = reaper.GetTakeName(active_take) or ""
+    end
+    items[#items + 1] = {
+      index = index + 1,
+      position = reaper.GetMediaItemInfo_Value(item, "D_POSITION"),
+      length = reaper.GetMediaItemInfo_Value(item, "D_LENGTH"),
+      track_id = track_id(item_track),
+      track_name = track_name(item_track),
+      take_name = take_name,
+    }
+  end
+  return items
+end
+
 local function collect_state()
   local tracks = {}
   local sends = {}
+  local receives = {}
+  local selected_tracks = {}
+  local selected_track_ids = {}
+  local folder_structure = {}
   local track_count = reaper.CountTracks(0)
+  local folder_stack = {}
   for index = 0, track_count - 1 do
     local track = reaper.GetTrack(0, index)
-    local _, name = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
+    local id = index + 1
+    local name = track_name(track)
     local fx = {}
     local fx_count = reaper.TrackFX_GetCount(track)
     for fx_index = 0, fx_count - 1 do
       local _, fx_name = reaper.TrackFX_GetFXName(track, fx_index, "")
       fx[#fx + 1] = fx_name
     end
-    tracks[#tracks + 1] = {
-      id = index + 1,
-      name = name,
-      fx = fx,
-      color = reaper.GetTrackColor(track),
-    }
+    local parent_id = folder_stack[#folder_stack]
+    local folder_delta = math.floor(reaper.GetMediaTrackInfo_Value(track, "I_FOLDERDEPTH"))
+    local depth = #folder_stack
+    local mainsend = reaper.GetMediaTrackInfo_Value(track, "B_MAINSEND") > 0
+    local selected = reaper.IsTrackSelected(track)
+    local track_sends = {}
+    local track_receives = {}
     local send_count = reaper.GetTrackNumSends(track, 0)
     for send_index = 0, send_count - 1 do
       local dest_track = reaper.GetTrackSendInfo_Value(track, 0, send_index, "P_DESTTRACK")
-      local dest_number = reaper.GetMediaTrackInfo_Value(dest_track, "IP_TRACKNUMBER")
-      sends[#sends + 1] = {
-        src = index + 1,
-        dst = math.floor(dest_number),
+      local send_info = {
+        index = send_index,
+        src = id,
+        dst = track_id(dest_track),
+        dst_name = track_name(dest_track),
       }
+      sends[#sends + 1] = send_info
+      track_sends[#track_sends + 1] = send_info
+    end
+    local receive_count = reaper.GetTrackNumSends(track, -1)
+    for receive_index = 0, receive_count - 1 do
+      local src_track = reaper.GetTrackSendInfo_Value(track, -1, receive_index, "P_SRCTRACK")
+      local receive_info = {
+        index = receive_index,
+        src = track_id(src_track),
+        src_name = track_name(src_track),
+        dst = id,
+      }
+      receives[#receives + 1] = receive_info
+      track_receives[#track_receives + 1] = receive_info
+    end
+
+    local track_entry = {
+      id = id,
+      name = name,
+      fx = fx,
+      fx_count = fx_count,
+      color = reaper.GetTrackColor(track),
+      selected = selected,
+      sends = track_sends,
+      receives = track_receives,
+      depth = depth,
+      parent_track_id = parent_id,
+      folder_depth_delta = folder_delta,
+      is_folder_parent = folder_delta > 0,
+      has_parent_send = mainsend,
+      is_bus = #track_receives > 0,
+    }
+
+    if selected then
+      selected_track_ids[#selected_track_ids + 1] = id
+      selected_tracks[#selected_tracks + 1] = {
+        id = id,
+        name = name,
+      }
+    end
+
+    tracks[#tracks + 1] = track_entry
+
+    folder_structure[#folder_structure + 1] = {
+      id = id,
+      name = name,
+      parent_track_id = parent_id,
+      depth = depth,
+      is_folder_parent = folder_delta > 0,
+      is_bus = track_entry.is_bus,
+    }
+
+    if folder_delta > 0 then
+      folder_stack[#folder_stack + 1] = id
+    elseif folder_delta < 0 then
+      for _ = 1, math.abs(folder_delta) do
+        if #folder_stack > 0 then
+          table.remove(folder_stack)
+        end
+      end
     end
   end
   local _, project_name = reaper.GetProjectName(0, "")
+  local markers, regions = collect_markers_and_regions()
+  local selected_items = collect_selected_items()
   return {
     bridge_connected = true,
     project_name = project_name ~= "" and project_name or "REAPER Project",
     tempo = reaper.Master_GetTempo(),
     tracks = tracks,
     sends = sends,
+    receives = receives,
+    markers = markers,
+    regions = regions,
+    selected_track_ids = selected_track_ids,
+    selected_item_count = #selected_items,
+    folder_structure = folder_structure,
+    selection = {
+      tracks = selected_tracks,
+      items = selected_items,
+    },
+    envelopes_summary = {},
   }
 end
 
