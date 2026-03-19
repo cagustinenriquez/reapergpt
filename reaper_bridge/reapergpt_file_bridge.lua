@@ -387,6 +387,63 @@ local function get_track_by_ref(ref)
   return nil, "unsupported track reference"
 end
 
+local function track_id(track)
+  if not track then
+    return nil
+  end
+  return math.floor(reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER"))
+end
+
+local function track_name(track)
+  if not track then
+    return ""
+  end
+  local _, name = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
+  return name
+end
+
+local function get_track_by_entity_ref(ref, action_outputs)
+  if type(ref) ~= "table" then
+    return nil, "entity ref must be an object"
+  end
+  if ref.track_id ~= nil then
+    return get_track_by_ref({type = "track_id", value = ref.track_id})
+  end
+  if type(ref.name) == "string" and ref.name ~= "" then
+    return get_track_by_ref({type = "track_name", value = ref.name})
+  end
+  if type(ref.action_id) == "string" and ref.action_id ~= "" then
+    local output = action_outputs and action_outputs[ref.action_id] or nil
+    if type(output) ~= "table" then
+      return nil, "unknown action reference"
+    end
+    if output.track_id ~= nil then
+      return get_track_by_ref({type = "track_id", value = output.track_id})
+    end
+    if type(output.name) == "string" and output.name ~= "" then
+      return get_track_by_ref({type = "track_name", value = output.name})
+    end
+    return nil, "action reference does not resolve to a track"
+  end
+  return nil, "unsupported entity ref"
+end
+
+local function describe_entity_ref(ref)
+  if type(ref) ~= "table" then
+    return {type = "invalid"}
+  end
+  if ref.track_id ~= nil then
+    return {type = "track_id", value = ref.track_id}
+  end
+  if type(ref.name) == "string" and ref.name ~= "" then
+    return {type = "track_name", value = ref.name}
+  end
+  if type(ref.action_id) == "string" and ref.action_id ~= "" then
+    return {type = "action_id", value = ref.action_id}
+  end
+  return {type = "unknown"}
+end
+
 local function create_track(args, is_bus)
   local track_count = reaper.CountTracks(0)
   local insert_index = track_count
@@ -396,6 +453,7 @@ local function create_track(args, is_bus)
   reaper.GetSetMediaTrackInfo_String(track, "P_NAME", name, true)
   return {
     track_id = insert_index + 1,
+    track_index = insert_index + 1,
     name = name,
     is_bus = is_bus,
   }
@@ -421,6 +479,8 @@ local function create_send(args)
   end
   return {
     send_index = send_index,
+    src_track_id = track_id(src),
+    dst_track_id = track_id(dst),
     send_mode = send_mode,
     pre_fader = send_mode == 1,
   }
@@ -481,20 +541,42 @@ local TOOL_MAP = {
   ["project.set_tempo"] = set_tempo,
 }
 
-local function track_id(track)
-  if not track then
-    return nil
-  end
-  return math.floor(reaper.GetMediaTrackInfo_Value(track, "IP_TRACKNUMBER"))
+local function execute_track_create(action)
+  return create_track(action, false)
 end
 
-local function track_name(track)
-  if not track then
-    return ""
-  end
-  local _, name = reaper.GetSetMediaTrackInfo_String(track, "P_NAME", "", false)
-  return name
+local function execute_bus_create(action)
+  return create_track(action, true)
 end
+
+local function execute_send_create(action, action_outputs)
+  local src, src_error = get_track_by_entity_ref(action.source, action_outputs)
+  if not src then
+    error(src_error)
+  end
+  local dst, dst_error = get_track_by_entity_ref(action.destination, action_outputs)
+  if not dst then
+    error(dst_error)
+  end
+  local output = create_send({
+    src = {type = "track_id", value = track_id(src)},
+    dst = {type = "track_id", value = track_id(dst)},
+    pre_fader = action.mode == "pre-fader",
+  })
+  output.source_ref = describe_entity_ref(action.source)
+  output.destination_ref = describe_entity_ref(action.destination)
+  output.resolved_source_track_id = track_id(src)
+  output.resolved_source_track_name = track_name(src)
+  output.resolved_destination_track_id = track_id(dst)
+  output.resolved_destination_track_name = track_name(dst)
+  return output
+end
+
+local ACTION_MAP = {
+  ["track.create"] = execute_track_create,
+  ["bus.create"] = execute_bus_create,
+  ["send.create"] = execute_send_create,
+}
 
 local function collect_markers_and_regions()
   local markers = {}
@@ -682,7 +764,67 @@ end
 
 local function execute_plan(request)
   local results = {}
+  local action_outputs = {}
   reaper.Undo_BeginBlock()
+  if type(request.actions) == "table" and #request.actions > 0 then
+    for index, action in ipairs(request.actions) do
+      local action_name = action.action
+      local handler = ACTION_MAP[action_name]
+      if not handler then
+        reaper.Undo_EndBlock("Reaper Agent Failed", -1)
+        return {
+          request_id = request.request_id,
+          status = "error",
+          error = "unsupported action: " .. tostring(action_name),
+          results = results,
+        }
+      end
+      local ok, output = pcall(handler, action, action_outputs)
+      if not ok then
+        results[#results + 1] = {
+          index = index - 1,
+          action = action_name,
+          action_id = action.id,
+          status = "rejected",
+          detail = {
+            action_id = action.id,
+            action = action_name,
+            error = tostring(output),
+            input = action,
+            completed_action_ids = (function()
+              local completed = {}
+              for completed_action_id, _ in pairs(action_outputs) do
+                completed[#completed + 1] = completed_action_id
+              end
+              table.sort(completed)
+              return completed
+            end)(),
+          },
+        }
+        reaper.Undo_EndBlock("Reaper Agent Failed", -1)
+        return {
+          request_id = request.request_id,
+          status = "error",
+          error = tostring(output),
+          results = results,
+        }
+      end
+      action_outputs[action.id] = output
+      results[#results + 1] = {
+        index = index - 1,
+        action = action_name,
+        action_id = action.id,
+        status = "accepted",
+        output = output,
+      }
+    end
+    reaper.Undo_EndBlock("Reaper Agent Action", -1)
+    return {
+      request_id = request.request_id,
+      status = "ok",
+      results = results,
+    }
+  end
   for index, step in ipairs(request.steps or {}) do
     local tool = step.tool
     local handler = TOOL_MAP[tool]

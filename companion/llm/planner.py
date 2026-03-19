@@ -4,7 +4,7 @@ import logging
 import re
 from typing import Any, Iterable
 
-from companion.models.schemas import ClarificationOption, ClarificationPrompt, PlanResponse, PlanStep
+from companion.models.schemas import BridgePlanStep, ClarificationOption, ClarificationPrompt, PlanResponse
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ GENERIC_FX_MAP = {
 }
 
 
-def validate_plan_steps(steps: Iterable[PlanStep]) -> list[str]:
+def validate_plan_steps(steps: Iterable[BridgePlanStep]) -> list[str]:
     errors: list[str] = []
     for idx, step in enumerate(steps):
         requirements = ALLOWED_TOOLS.get(step.tool)
@@ -97,12 +97,12 @@ def _has_track_named(state: dict[str, Any] | None, name: str) -> bool:
     return False
 
 
-def _ensure_create_step(steps: list[PlanStep], tool: str, name: str) -> None:
+def _ensure_create_step(steps: list[BridgePlanStep], tool: str, name: str) -> None:
     cleaned = _clean_name(name)
     for step in steps:
         if step.tool == tool and _clean_name(str(step.args.get('name') or '')) == cleaned:
             return
-    steps.append(PlanStep(tool=tool, args={'name': cleaned}))
+    steps.append(BridgePlanStep(tool=tool, args={'name': cleaned}))
 
 
 def _clarification_response(prompt_id: str, question: str, options: list[str], summary: str) -> PlanResponse:
@@ -255,17 +255,17 @@ def _plan_explicit_creation(prompt: str) -> PlanResponse | None:
         buses.append('')
     if not tracks and not buses:
         return None
-    steps: list[PlanStep] = []
+    steps: list[BridgePlanStep] = []
     for track_name in tracks:
         if track_name:
             _ensure_create_step(steps, 'create_track', track_name)
         else:
-            steps.append(PlanStep(tool='create_track', args={}))
+            steps.append(BridgePlanStep(tool='create_track', args={}))
     for bus_name in buses:
         if bus_name:
             _ensure_create_step(steps, 'create_bus', bus_name)
         else:
-            steps.append(PlanStep(tool='create_bus', args={}))
+            steps.append(BridgePlanStep(tool='create_bus', args={}))
     return PlanResponse(ok=True, summary='Create the requested track and bus structure.', source='heuristic', steps=steps)
 
 
@@ -273,7 +273,7 @@ def _plan_route_prompt(prompt: str, state: dict[str, Any] | None, clarification_
     route_pairs = _extract_route_pairs(prompt)
     if not route_pairs:
         return None
-    steps: list[PlanStep] = []
+    steps: list[BridgePlanStep] = []
     for src_name, dst_name, pre_fader in route_pairs:
         src_ref, clarification = _resolve_track_or_clarify(
             state,
@@ -295,7 +295,7 @@ def _plan_route_prompt(prompt: str, state: dict[str, Any] | None, clarification_
         )
         if clarification:
             return clarification
-        steps.append(PlanStep(tool='create_send', args={'src': src_ref, 'dst': dst_ref, 'pre_fader': pre_fader}))
+        steps.append(BridgePlanStep(tool='create_send', args={'src': src_ref, 'dst': dst_ref, 'pre_fader': pre_fader}))
     return PlanResponse(ok=True, summary='Route the requested track sends.', source='heuristic', steps=steps)
 
 
@@ -318,7 +318,7 @@ def _plan_fx_insert(prompt: str, state: dict[str, Any] | None, clarification_ans
         ok=True,
         summary=f'Insert {fx_name} on {target}.',
         source='heuristic',
-        steps=[PlanStep(tool='insert_fx', args={'track_ref': track_ref, 'fx_name': fx_name})],
+        steps=[BridgePlanStep(tool='insert_fx', args={'track_ref': track_ref, 'fx_name': fx_name})],
     )
 
 
@@ -328,14 +328,14 @@ def _plan_basic_vocal_setup(prompt: str, state: dict[str, Any] | None) -> PlanRe
     track_name, bus_name = _infer_vocal_track_bus(prompt)
     track_name = track_name or 'Lead Vocal'
     bus_name = bus_name or 'Vocal Bus'
-    steps: list[PlanStep] = []
+    steps: list[BridgePlanStep] = []
     if not _has_track_named(state, track_name):
         _ensure_create_step(steps, 'create_track', track_name)
     if not _has_track_named(state, bus_name):
         _ensure_create_step(steps, 'create_bus', bus_name)
-    steps.append(PlanStep(tool='create_send', args={'src': _track_name_ref(track_name), 'dst': _track_name_ref(bus_name)}))
-    steps.append(PlanStep(tool='insert_fx', args={'track_ref': _track_name_ref(track_name), 'fx_name': 'ReaEQ'}))
-    steps.append(PlanStep(tool='insert_fx', args={'track_ref': _track_name_ref(track_name), 'fx_name': 'ReaComp'}))
+    steps.append(BridgePlanStep(tool='create_send', args={'src': _track_name_ref(track_name), 'dst': _track_name_ref(bus_name)}))
+    steps.append(BridgePlanStep(tool='insert_fx', args={'track_ref': _track_name_ref(track_name), 'fx_name': 'ReaEQ'}))
+    steps.append(BridgePlanStep(tool='insert_fx', args={'track_ref': _track_name_ref(track_name), 'fx_name': 'ReaComp'}))
     return PlanResponse(ok=True, summary='Create a basic vocal track and bus with routing and core FX.', source='heuristic', steps=steps)
 
 
@@ -347,7 +347,7 @@ def _plan_drum_bus(prompt: str, state: dict[str, Any] | None) -> PlanResponse | 
         name = (track.get('name') or '').lower()
         if any(keyword in name for keyword in DRUM_KEYWORDS):
             tracks.append(track)
-    steps: list[PlanStep] = [PlanStep(tool='create_bus', args={'name': 'Drum Bus'})]
+    steps: list[BridgePlanStep] = [BridgePlanStep(tool='create_bus', args={'name': 'Drum Bus'})]
     refs: list[dict[str, Any]] = []
     for track in tracks:
         ref = _resolve_track_ref(track)
@@ -359,23 +359,23 @@ def _plan_drum_bus(prompt: str, state: dict[str, Any] | None) -> PlanResponse | 
             refs.append({'type': 'track_name', 'value': keyword.capitalize()})
             existing_names.add(keyword.capitalize())
     for ref in refs:
-        steps.append(PlanStep(tool='create_send', args={'src': ref, 'dst': {'type': 'track_name', 'value': 'Drum Bus'}}))
+        steps.append(BridgePlanStep(tool='create_send', args={'src': ref, 'dst': {'type': 'track_name', 'value': 'Drum Bus'}}))
     return PlanResponse(ok=True, summary='Create a Drum Bus and route the detected drum tracks into it.', source='heuristic', steps=steps)
 
 
 def _plan_vocal_session(prompt: str) -> PlanResponse | None:
     if 'vocal session' not in prompt:
         return None
-    steps: list[PlanStep] = []
+    steps: list[BridgePlanStep] = []
     for name in ['Lead Vocal', 'Double L', 'Double R']:
-        steps.append(PlanStep(tool='create_track', args={'name': name}))
-    steps.append(PlanStep(tool='create_bus', args={'name': 'Vocal Bus'}))
-    steps.append(PlanStep(tool='create_bus', args={'name': 'Reverb Bus'}))
-    steps.append(PlanStep(tool='insert_fx', args={'track_ref': {'type': 'track_name', 'value': 'Lead Vocal'}, 'fx_name': 'ReaEQ'}))
-    steps.append(PlanStep(tool='insert_fx', args={'track_ref': {'type': 'track_name', 'value': 'Lead Vocal'}, 'fx_name': 'ReaComp'}))
+        steps.append(BridgePlanStep(tool='create_track', args={'name': name}))
+    steps.append(BridgePlanStep(tool='create_bus', args={'name': 'Vocal Bus'}))
+    steps.append(BridgePlanStep(tool='create_bus', args={'name': 'Reverb Bus'}))
+    steps.append(BridgePlanStep(tool='insert_fx', args={'track_ref': {'type': 'track_name', 'value': 'Lead Vocal'}, 'fx_name': 'ReaEQ'}))
+    steps.append(BridgePlanStep(tool='insert_fx', args={'track_ref': {'type': 'track_name', 'value': 'Lead Vocal'}, 'fx_name': 'ReaComp'}))
     for singer in ['Lead Vocal', 'Double L', 'Double R']:
-        steps.append(PlanStep(tool='create_send', args={'src': {'type': 'track_name', 'value': singer}, 'dst': {'type': 'track_name', 'value': 'Vocal Bus'}}))
-    steps.append(PlanStep(tool='create_send', args={'src': {'type': 'track_name', 'value': 'Vocal Bus'}, 'dst': {'type': 'track_name', 'value': 'Reverb Bus'}}))
+        steps.append(BridgePlanStep(tool='create_send', args={'src': {'type': 'track_name', 'value': singer}, 'dst': {'type': 'track_name', 'value': 'Vocal Bus'}}))
+    steps.append(BridgePlanStep(tool='create_send', args={'src': {'type': 'track_name', 'value': 'Vocal Bus'}, 'dst': {'type': 'track_name', 'value': 'Reverb Bus'}}))
     return PlanResponse(ok=True, summary='Create a vocal session template with buses, FX, and routing.', source='heuristic', steps=steps)
 
 
@@ -383,13 +383,13 @@ def _plan_transport(prompt: str) -> PlanResponse | None:
     wants_play = 'play' in prompt and 'stop' not in prompt
     wants_stop = 'stop' in prompt and 'play' not in prompt
     if 'play' in prompt and 'stop' in prompt:
-        steps = [PlanStep(tool='transport.play', args={}), PlanStep(tool='transport.stop', args={})]
+        steps = [BridgePlanStep(tool='transport.play', args={}), BridgePlanStep(tool='transport.stop', args={})]
         return PlanResponse(ok=True, summary='Play and stop the transport.', source='heuristic', steps=steps)
-    steps: list[PlanStep] = []
+    steps: list[BridgePlanStep] = []
     if wants_play:
-        steps.append(PlanStep(tool='transport.play', args={}))
+        steps.append(BridgePlanStep(tool='transport.play', args={}))
     if wants_stop:
-        steps.append(PlanStep(tool='transport.stop', args={}))
+        steps.append(BridgePlanStep(tool='transport.stop', args={}))
     if steps:
         return PlanResponse(ok=True, summary='Control playback.', source='heuristic', steps=steps)
     return None
@@ -399,7 +399,7 @@ def _plan_tempo(prompt: str) -> PlanResponse | None:
     bpm = _extract_tempo(prompt)
     if bpm is None:
         return None
-    return PlanResponse(ok=True, summary=f'Set project tempo to {bpm:.0f} BPM.', source='heuristic', steps=[PlanStep(tool='project.set_tempo', args={'bpm': bpm})])
+    return PlanResponse(ok=True, summary=f'Set project tempo to {bpm:.0f} BPM.', source='heuristic', steps=[BridgePlanStep(tool='project.set_tempo', args={'bpm': bpm})])
 
 
 def plan_prompt_to_actions(

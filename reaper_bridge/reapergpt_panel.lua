@@ -41,6 +41,7 @@ local state = {
   plan_id = nil,
   plan_summary = "No preview loaded.",
   plan_steps = {},
+  plan_warnings = {},
   clarification_id = nil,
   clarification_question = nil,
   clarification_options = {},
@@ -607,24 +608,15 @@ local function poll_apply_result()
 end
 
 local function format_step(step)
-  local tool = step.tool or "unknown"
-  local args = step.args or {}
-  if tool == "create_track" or tool == "create_bus" then
-    return tool .. " " .. tostring(args.name or "")
+  if type(step) ~= "table" then
+    return tostring(step or "unknown")
   end
-  if tool == "create_send" then
-    local src = args.src and args.src.value or "?"
-    local dst = args.dst and args.dst.value or "?"
-    return tool .. " " .. tostring(src) .. " -> " .. tostring(dst)
+  local title = tostring(step.title or step.id or "Step")
+  local description = tostring(step.description or "")
+  if description ~= "" then
+    return title .. ": " .. description
   end
-  if tool == "insert_fx" then
-    local target = args.track_ref and args.track_ref.value or "?"
-    return tool .. " " .. tostring(args.fx_name or "") .. " on " .. tostring(target)
-  end
-  if tool == "project.set_tempo" then
-    return tool .. " " .. tostring(args.bpm or "")
-  end
-  return tool
+  return title
 end
 
 local function clear_clarification()
@@ -661,7 +653,7 @@ local function preview_prompt()
   end
   local ok, payload = api_request(
     "POST",
-    "/plan",
+    "/prompt",
     request_payload
   )
   if not ok then
@@ -670,21 +662,12 @@ local function preview_prompt()
     append_log("preview_failed instance=" .. PANEL_INSTANCE_ID .. " detail=" .. tostring(message))
     return
   end
-  if payload.requires_clarification and payload.clarification then
-    state.plan_id = nil
-    state.plan_summary = payload.summary or "Clarification needed."
-    state.plan_steps = {}
-    state.clarification_id = payload.clarification.id
-    state.clarification_question = payload.clarification.question
-    state.clarification_options = payload.clarification.options or {}
-    state.last_result = "Clarification needed before preview can continue."
-    append_log("preview_clarification instance=" .. PANEL_INSTANCE_ID .. " clarification_id=" .. tostring(state.clarification_id))
-    return
-  end
   clear_clarification()
   state.plan_id = payload.plan_id
-  state.plan_summary = payload.summary or "No summary."
-  state.plan_steps = payload.steps or {}
+  local plan = payload.plan or {}
+  state.plan_summary = plan.summary or "No summary."
+  state.plan_steps = plan.steps or {}
+  state.plan_warnings = plan.warnings or {}
   state.last_result = payload.ok and "Preview ready." or "Preview returned no executable steps."
   append_log("preview_ready instance=" .. PANEL_INSTANCE_ID .. " plan_id=" .. tostring(state.plan_id))
 end
@@ -860,6 +843,9 @@ end
 
 format_step_result_line = function(result)
   local prefix = string.format("%d. [%s] %s", tonumber(result.index or 0) + 1, tostring(result.status or "?"), tostring(result.tool or "unknown"))
+  if result.action_id then
+    prefix = prefix .. " (" .. tostring(result.action_id) .. ")"
+  end
   local detail = result.detail
   if type(detail) ~= "table" then
     if detail ~= nil then
@@ -867,10 +853,22 @@ format_step_result_line = function(result)
     end
     return prefix
   end
+  if detail.error then
+    return prefix .. " - " .. tostring(detail.error)
+  end
+  if detail.message then
+    return prefix .. " - " .. tostring(detail.message)
+  end
   if result.tool == "create_track" or result.tool == "create_bus" then
     return prefix .. " - track_id " .. tostring(detail.track_id or "?")
   end
+  if result.tool == "track.create" or result.tool == "bus.create" then
+    return prefix .. " - track_id " .. tostring(detail.track_id or "?")
+  end
   if result.tool == "create_send" then
+    return prefix .. " - send_index " .. tostring(detail.send_index or "?")
+  end
+  if result.tool == "send.create" then
     return prefix .. " - send_index " .. tostring(detail.send_index or "?")
   end
   if result.tool == "insert_fx" then
@@ -974,6 +972,11 @@ local function render()
       gfx.x = 16
       gfx.y = 274 + ((index - 1) * 18)
       gfx.drawstr(string.format("%d. %s", index, format_step(state.plan_steps[index])))
+    end
+    if #state.plan_warnings > 0 then
+      gfx.set(1, 0.75, 0.30, 1)
+      draw_wrapped_text("Warning: " .. tostring(state.plan_warnings[1]), 16, 426, gfx.w - 32, 18, 2)
+      gfx.set(1, 1, 1, 1)
     end
   end
 

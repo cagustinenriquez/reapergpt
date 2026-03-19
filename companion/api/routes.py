@@ -10,14 +10,16 @@ from companion.config import Settings, get_settings
 from companion.daws.reaper.client import ActionExecutionError, ReaperBridgeClient, get_bridge_client
 from companion.llm.planner import plan_prompt_to_actions, validate_plan_steps
 from companion.models.schemas import (
+    BridgePlanStep,
     ExecutePlanRequest,
     ExecutePlanResponse,
     PlanRequest,
     PlanResponse,
-    PlanStep,
     StepResult,
     VerificationResult,
 )
+from companion.models.session_builder_plan import PromptRequest, PromptResponse, SessionBuilderPlan
+from companion.session_builder import build_mock_prompt_plan, compile_session_plan
 
 router = APIRouter()
 _saved_plans: dict[str, dict[str, Any]] = {}
@@ -82,7 +84,7 @@ def _send_mode_matches(send: dict[str, Any], pre_fader: bool) -> bool:
     return not pre_fader
 
 
-def _verify_steps(steps: list[PlanStep], results: list[StepResult], final_state: dict[str, Any]) -> tuple[list[VerificationResult], list[str]]:
+def _verify_steps(steps: list[BridgePlanStep], results: list[StepResult], final_state: dict[str, Any]) -> tuple[list[VerificationResult], list[str]]:
     accepted_by_index = {result.index: result for result in results if result.status in {"accepted", "ok"}}
     verification_results: list[VerificationResult] = []
     verification_errors: list[str] = []
@@ -106,6 +108,7 @@ def _verify_steps(steps: list[PlanStep], results: list[StepResult], final_state:
                 VerificationResult(
                     index=index,
                     tool=step.tool,
+                    action_id=executed.action_id,
                     check=check_name,
                     ok=ok,
                     expected={"name": step.args.get("name"), "track_id": detail.get("track_id") if isinstance(detail, dict) else None},
@@ -114,7 +117,7 @@ def _verify_steps(steps: list[PlanStep], results: list[StepResult], final_state:
                 )
             )
             if not ok:
-                verification_errors.append(f"step {index} {check_name}: track missing from final project state")
+                verification_errors.append(_format_verification_error(index, executed.action_id, check_name, "track missing from final project state"))
             continue
 
         if step.tool == "create_send":
@@ -136,6 +139,7 @@ def _verify_steps(steps: list[PlanStep], results: list[StepResult], final_state:
                 VerificationResult(
                     index=index,
                     tool=step.tool,
+                    action_id=executed.action_id,
                     check="send_exists",
                     ok=ok,
                     expected={"src": step.args.get("src"), "dst": step.args.get("dst"), "pre_fader": expected_pre_fader},
@@ -144,7 +148,7 @@ def _verify_steps(steps: list[PlanStep], results: list[StepResult], final_state:
                 )
             )
             if not ok:
-                verification_errors.append(f"step {index} send_exists: send missing or send mode mismatch in final project state")
+                verification_errors.append(_format_verification_error(index, executed.action_id, "send_exists", "send missing or send mode mismatch in final project state"))
             continue
 
         if step.tool == "insert_fx":
@@ -155,6 +159,7 @@ def _verify_steps(steps: list[PlanStep], results: list[StepResult], final_state:
                 VerificationResult(
                     index=index,
                     tool=step.tool,
+                    action_id=executed.action_id,
                     check="fx_inserted",
                     ok=ok,
                     expected={"track_ref": step.args.get("track_ref"), "fx_name": step.args.get("fx_name")},
@@ -163,7 +168,7 @@ def _verify_steps(steps: list[PlanStep], results: list[StepResult], final_state:
                 )
             )
             if not ok:
-                verification_errors.append(f"step {index} fx_inserted: FX missing from final project state")
+                verification_errors.append(_format_verification_error(index, executed.action_id, "fx_inserted", "FX missing from final project state"))
             continue
 
         if step.tool == "project.set_tempo":
@@ -174,6 +179,7 @@ def _verify_steps(steps: list[PlanStep], results: list[StepResult], final_state:
                 VerificationResult(
                     index=index,
                     tool=step.tool,
+                    action_id=executed.action_id,
                     check="tempo_changed",
                     ok=ok,
                     expected={"bpm": expected_bpm},
@@ -182,9 +188,43 @@ def _verify_steps(steps: list[PlanStep], results: list[StepResult], final_state:
                 )
             )
             if not ok:
-                verification_errors.append(f"step {index} tempo_changed: final tempo does not match expected BPM")
+                verification_errors.append(_format_verification_error(index, executed.action_id, "tempo_changed", "final tempo does not match expected BPM"))
 
     return verification_results, verification_errors
+
+
+def _format_verification_error(index: int, action_id: str | None, check: str, message: str) -> str:
+    if action_id:
+        return f"step {index} action {action_id} {check}: {message}"
+    return f"step {index} {check}: {message}"
+
+
+def _format_apply_failure(bridge_result: dict[str, Any], verification_errors: list[str]) -> str:
+    results = bridge_result.get("results", [])
+    if isinstance(results, list):
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status", "unknown"))
+            if status in {"accepted", "ok"}:
+                continue
+            action_name = item.get("action") or item.get("tool") or "unknown"
+            action_id = item.get("action_id")
+            detail = item.get("detail")
+            error_message = None
+            if isinstance(detail, dict):
+                error_message = detail.get("error") or detail.get("message")
+            elif detail is not None:
+                error_message = str(detail)
+            if error_message:
+                if action_id:
+                    return f"action {action_id} ({action_name}) failed: {error_message}"
+                return f"{action_name} failed: {error_message}"
+    if bridge_result.get("error"):
+        return str(bridge_result.get("error"))
+    if verification_errors:
+        return "; ".join(verification_errors)
+    return "bridge execution failed"
 
 
 def get_reaper_client(settings: Settings = Depends(get_settings)) -> ReaperBridgeClient:
@@ -260,6 +300,29 @@ def plan_endpoint(
     return response
 
 
+@router.post("/prompt", response_model=PromptResponse)
+def prompt_endpoint(
+    payload: PromptRequest,
+    client: ReaperBridgeClient = Depends(get_reaper_client),
+) -> PromptResponse:
+    _prune_saved_plans(client._settings.saved_plan_ttl_seconds)
+    prompt = payload.prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt must not be empty")
+    try:
+        plan = build_mock_prompt_plan(payload)
+        compiled_steps = compile_session_plan(plan)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    plan_id = str(uuid.uuid4())
+    _saved_plans[plan_id] = {
+        "created_at": time.monotonic(),
+        "plan": plan,
+        "steps": compiled_steps,
+    }
+    return PromptResponse(plan_id=plan_id, plan=plan)
+
+
 @router.post("/execute-plan", response_model=ExecutePlanResponse)
 def execute_plan(
     payload: ExecutePlanRequest,
@@ -267,13 +330,21 @@ def execute_plan(
 ) -> ExecutePlanResponse:
     _prune_saved_plans(client._settings.saved_plan_ttl_seconds)
     steps = payload.steps
+    typed_plan: SessionBuilderPlan | None = None
     if payload.plan_id:
         saved_plan = _saved_plans.get(payload.plan_id)
         if not saved_plan:
             if payload.plan_id in _expired_plan_ids:
                 raise HTTPException(status_code=410, detail=f"expired plan_id '{payload.plan_id}'")
             raise HTTPException(status_code=404, detail=f"unknown plan_id '{payload.plan_id}'")
-        steps = saved_plan.get("steps")
+        if isinstance(saved_plan.get("plan"), SessionBuilderPlan):
+            typed_plan = saved_plan["plan"]
+            try:
+                steps = compile_session_plan(typed_plan)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+        else:
+            steps = saved_plan.get("steps")
     if not steps:
         raise HTTPException(status_code=400, detail="plan must include at least one step")
     errors = validate_plan_steps(steps)
@@ -281,7 +352,7 @@ def execute_plan(
         raise HTTPException(status_code=400, detail="; ".join(errors))
 
     try:
-        bridge_result = client.execute_plan(steps)
+        bridge_result = client.execute_session_plan(typed_plan) if typed_plan is not None else client.execute_plan(steps)
     except ActionExecutionError as exc:
         return ExecutePlanResponse(
             success=False,
@@ -298,10 +369,18 @@ def execute_plan(
         if not isinstance(item, dict):
             continue
         result_index = int(item.get("index", idx))
-        tool = str(item.get("tool", steps[result_index].tool if result_index < len(steps) else "unknown"))
+        tool = str(item.get("tool") or item.get("action") or (steps[result_index].tool if result_index < len(steps) else "unknown"))
         status = str(item.get("status", "unknown"))
         detail = item.get("output") if "output" in item else item.get("detail")
-        results.append(StepResult(index=result_index, tool=tool, status=status, detail=detail))
+        results.append(
+            StepResult(
+                index=result_index,
+                tool=tool,
+                status=status,
+                action_id=item.get("action_id"),
+                detail=detail,
+            )
+        )
 
     failed_step_index = None
     success = bridge_result.get("status") == "ok"
@@ -329,10 +408,6 @@ def execute_plan(
         project_state_error=(
             None
             if success
-            else (
-                str(bridge_result.get("error"))
-                if bridge_result.get("error")
-                else ("; ".join(verification_errors) if verification_errors else "bridge execution failed")
-            )
+            else _format_apply_failure(bridge_result, verification_errors)
         ),
     )

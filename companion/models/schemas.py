@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 
-class PlanStep(BaseModel):
+class BridgePlanStep(BaseModel):
     tool: str
     args: dict[str, Any] = Field(default_factory=dict)
 
@@ -47,11 +47,11 @@ class PlanResponse(BaseModel):
     requires_clarification: bool = False
     clarification: ClarificationPrompt | None = None
     plan_id: str | None = None
-    steps: list[PlanStep] = Field(default_factory=list)
+    steps: list[BridgePlanStep] = Field(default_factory=list)
 
 
 class ExecutePlanRequest(BaseModel):
-    steps: list[PlanStep] | None = None
+    steps: list[BridgePlanStep] | None = None
     plan_id: str | None = None
 
     @model_validator(mode="after")
@@ -67,12 +67,14 @@ class StepResult(BaseModel):
     index: int
     tool: str
     status: str
+    action_id: str | None = None
     detail: dict[str, Any] | str | None = None
 
 
 class VerificationResult(BaseModel):
     index: int
     tool: str
+    action_id: str | None = None
     check: str
     ok: bool
     expected: dict[str, Any] = Field(default_factory=dict)

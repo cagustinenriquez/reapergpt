@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from companion.config import Settings, get_settings
-from companion.models.schemas import PlanStep
+from companion.models.schemas import BridgePlanStep
+from companion.models.session_builder_plan import SessionBuilderPlan
 
 
 class ActionExecutionError(RuntimeError):
@@ -64,7 +65,7 @@ class ReaperBridgeClient:
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             return self._default_state()
 
-    def execute_plan(self, steps: list[PlanStep]) -> dict[str, Any]:
+    def execute_plan(self, steps: list[BridgePlanStep]) -> dict[str, Any]:
         request_id = str(uuid.uuid4())
         self._clear_stale_request()
         self._clear_stale_result(request_id=request_id)
@@ -72,6 +73,23 @@ class ReaperBridgeClient:
             "request_id": request_id,
             "created_at": time.time(),
             "steps": [step.model_dump() for step in steps],
+        }
+        self._atomic_write_json(self._settings.bridge_request_path, payload)
+        return self._wait_for_result(request_id)
+
+    def execute_session_plan(self, plan: SessionBuilderPlan) -> dict[str, Any]:
+        request_id = str(uuid.uuid4())
+        self._clear_stale_request()
+        self._clear_stale_result(request_id=request_id)
+        payload = {
+            "request_id": request_id,
+            "created_at": time.time(),
+            "plan": {
+                "version": plan.version,
+                "summary": plan.summary,
+                "requires_confirmation": plan.requires_confirmation,
+            },
+            "actions": [action.model_dump(mode="json") for action in plan.actions],
         }
         self._atomic_write_json(self._settings.bridge_request_path, payload)
         return self._wait_for_result(request_id)
