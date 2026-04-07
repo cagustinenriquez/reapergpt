@@ -1,0 +1,52 @@
+Next Milestone Tasks
+====================
+
+Milestone
+---------
+Typed planner unification, persistent previews, and an LLM-ready planner interface.
+
+
+Tasks
+-----
+
+1. Define the canonical planning contract.
+Use `SessionBuilderPlan` as the single internal plan format for preview and execution, and decide which response fields `/plan` and `/prompt` should keep or deprecate.
+
+2. Introduce a planner service layer.
+Create a small planner interface so the API depends on `plan(prompt, state, clarification_answers)` rather than directly calling heuristic functions.
+
+3. Move current heuristic planning behind that interface.
+Refactor the logic in `companion/llm/planner.py` so it returns the canonical typed plan, not ad hoc bridge steps.
+
+4. Unify `/plan` and `/prompt`.
+Make both endpoints use the same planner backend, with one endpoint focused on preview shape and the other kept only if it still adds product value.
+
+5. Add plan compilation as a separate step.
+Keep planning and execution compilation distinct: planner returns `SessionBuilderPlan`, compiler turns it into bridge actions or bridge steps.
+
+6. Replace in-memory saved plans with persistent storage.
+Move `_saved_plans` and expiry handling out of `companion/api/routes.py` into a storage module backed by SQLite.
+
+7. Add a persisted plan repository.
+Support create, get, expire, and list operations for plans, with timestamps, source, summary, serialized plan payload, and optional prompt metadata.
+
+8. Make `plan_id` execution restart-safe.
+Ensure `/execute-plan` can resolve a stored `plan_id` after the API process restarts.
+
+9. Add planner backend selection.
+Support at least `heuristic` and `llm` backends in config, even if `llm` is initially a stub.
+
+10. Add an LLM planner adapter skeleton.
+Define where model prompts, schema validation, retries, and fallback behavior will live, without fully implementing model integration yet.
+
+11. Normalize API response models.
+Make preview responses consistent regardless of backend so the REAPER panel does not care whether the plan came from heuristics or an LLM.
+
+12. Update tests around the new architecture.
+Refactor existing tests so they validate canonical plan generation, storage-backed `plan_id` lookup, and endpoint behavior after unification.
+
+13. Add new tests for persistence.
+Cover restart-safe retrieval, TTL expiration in storage, invalid stored payloads, and compile-time failures from persisted plans.
+
+14. Update docs.
+Document the new planner flow, persistence model, and the role of heuristic fallback.

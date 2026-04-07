@@ -11,6 +11,7 @@ from companion.api.routes import get_settings
 from companion.config import Settings, reset_settings
 from companion.daws.reaper.client import reset_bridge_client
 from companion.main import app
+from companion.storage.plan_repository import reset_plan_repository
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -19,12 +20,15 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 def _bridge_settings(test_name: str) -> Settings:
-    bridge_root = Path("data") / "pytest_bridge" / f"{test_name}_{uuid.uuid4().hex}"
+    run_id = uuid.uuid4().hex
+    bridge_root = Path("data") / "pytest_bridge" / f"{test_name}_{run_id}"
+    db_path = Path("data") / "pytest_bridge" / f"{test_name}_{run_id}.db"
     return Settings(
         bridge_root=bridge_root,
         bridge_timeout_seconds=1.5,
         bridge_poll_interval_ms=25,
         saved_plan_ttl_seconds=300.0,
+        db_path=db_path,
     )
 
 
@@ -51,10 +55,12 @@ def _simulate_reaper(settings: Settings, state_payload: dict, result_builder) ->
 def _reset_globals():
     reset_bridge_client()
     reset_settings()
+    reset_plan_repository()
     app.dependency_overrides.clear()
     yield
     reset_bridge_client()
     reset_settings()
+    reset_plan_repository()
     app.dependency_overrides.clear()
 
 
@@ -701,11 +707,13 @@ def test_plan_id_preview_can_be_executed_later(bridge_cleanup):
 
 
 def test_execute_plan_returns_410_for_expired_plan_id(bridge_cleanup):
+    run_id = uuid.uuid4().hex
     settings = Settings(
-        bridge_root=Path("data") / "pytest_bridge" / f"expired_plan_{uuid.uuid4().hex}",
+        bridge_root=Path("data") / "pytest_bridge" / f"expired_plan_{run_id}",
         bridge_timeout_seconds=1.5,
         bridge_poll_interval_ms=25,
         saved_plan_ttl_seconds=0.01,
+        db_path=Path("data") / "pytest_bridge" / f"expired_plan_{run_id}.db",
     )
     bridge_cleanup(settings.bridge_root)
     _write_json(

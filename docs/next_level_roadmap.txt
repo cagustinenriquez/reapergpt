@@ -1,0 +1,175 @@
+ReaperGPT Next-Level Roadmap
+============================
+
+Objective
+---------
+Move the project from a working MVP into a more capable, reliable, and usable REAPER assistant.
+
+
+What "next level" should mean
+-----------------------------
+The next version should:
+
+- handle broader prompts without brittle regex branching
+- survive restarts and concurrent usage
+- execute plans with stronger guarantees and better failure reporting
+- feel like a usable REAPER assistant rather than just a demo transport
+
+
+Highest-impact roadmap
+----------------------
+
+1. Replace the split planning model with one canonical planner.
+
+Use the typed action model in `companion/models/session_builder_plan.py` as the single source of truth.
+Make `/plan` and `/prompt` two views over the same planner output.
+
+Current issue:
+- `companion/llm/planner.py` contains heuristic planning logic
+- `companion/session_builder.py` contains a separate typed planning path
+- the two paths overlap and will drift over time
+
+Target:
+- one planner output format
+- one validation path
+- one compilation path to executable actions
+
+
+2. Move from regex planning to constrained LLM planning.
+
+Have the model produce `SessionBuilderPlan` JSON, then validate it with Pydantic before execution.
+Keep the heuristic planner as a fallback, not as the primary planner.
+
+Why:
+- broader natural-language coverage
+- fewer special-case regex branches
+- better extensibility as the action vocabulary grows
+
+Requirements:
+- strict schema validation
+- clear rejection path for invalid model output
+- deterministic fallback behavior
+
+
+3. Persist plans and execution history.
+
+The current `_saved_plans` storage in `companion/api/routes.py` is in-memory only.
+That means previews disappear on restart and the app is not safe for multi-worker deployment.
+
+Add persistent storage, preferably SQLite at this stage, for:
+- saved plans
+- execution attempts
+- verification results
+- prompt and planner metadata
+
+Benefits:
+- preview/apply survives restarts
+- better debugging
+- audit trail for failures and regressions
+
+
+4. Strengthen the bridge protocol.
+
+The file bridge works for an MVP, but it needs a more explicit protocol.
+
+Add:
+- protocol version field
+- explicit request states: `queued`, `running`, `completed`, `failed`
+- structured error codes
+- execution timestamps and duration
+- bridge heartbeat / instance ownership
+
+Why:
+- fewer ambiguous failures
+- easier debugging across Python and Lua
+- better recovery when REAPER is slow or multiple instances exist
+
+
+5. Add execution guardrails.
+
+Before applying a plan, run a dry-run validator against the current project state.
+
+Checks should include:
+- unresolved references
+- duplicate creations
+- invalid routing targets
+- unsupported FX or plugin names
+- destructive or ambiguous changes that require confirmation
+
+Goal:
+- fail early before writing a bridge request
+- reduce mismatch between accepted plan and actual project result
+
+
+6. Expand the action vocabulary.
+
+The typed action model is a good start, but still narrow.
+
+Next actions to support:
+- folder tracks
+- item selection and edit actions
+- track volume, mute, and solo
+- FX chain presets
+- markers and regions
+- record-arm and input assignment
+- template application
+
+This increases the usefulness of the assistant without changing the overall architecture.
+
+
+7. Improve the REAPER-side UX.
+
+The current panel is functional but still minimal.
+
+Upgrade it to show:
+- plan diff before apply
+- warnings and clarifications inline
+- execution progress
+- verification mismatches with retry or fix guidance
+
+Goal:
+- make the assistant feel operational inside REAPER, not just connected
+
+
+Recommended implementation order
+--------------------------------
+
+If work starts now, the best sequence is:
+
+1. unify `/plan` and `/prompt` around `SessionBuilderPlan`
+2. add persistent plan storage with SQLite
+3. introduce a planner interface with `heuristic` and `llm` backends
+4. tighten the bridge and result schema with protocol versioning
+5. add plan preflight validation and better UI feedback
+
+
+Best first milestone
+--------------------
+
+Typed planner unification plus persistent previews plus an LLM-ready planner interface.
+
+Why this milestone first:
+- removes duplication
+- makes the system resilient beyond one process
+- creates a clean insertion point for a real model
+- improves architecture before adding more complexity
+
+
+Suggested definition of done for that milestone
+-----------------------------------------------
+
+- `/plan` and `/prompt` share one canonical planner backend
+- plans are persisted outside process memory
+- `SessionBuilderPlan` is the contract for preview and execution
+- planner backends are swappable behind a common interface
+- the heuristic planner remains available as fallback
+- execution can resolve persisted `plan_id` values after restart
+
+
+Summary
+-------
+
+The project already proves the end-to-end loop.
+The next step is not adding random features first.
+The right move is to stabilize the architecture around one typed planner, durable storage, and a stronger bridge contract.
+Once that is in place, LLM planning and broader REAPER control become much easier to add safely.

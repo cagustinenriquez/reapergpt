@@ -1,15 +1,19 @@
 from __future__ import annotations
 
-import time
-import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from companion.config import Settings, get_settings
 from companion.daws.reaper.client import ActionExecutionError, ReaperBridgeClient, get_bridge_client
-from companion.llm.planner import plan_prompt_to_actions, validate_plan_steps
+from companion.llm.planner import validate_plan_steps
 from companion.models.schemas import (
+<<<<<<< Updated upstream
+=======
+    BridgePlanStep,
+    ClarificationOption,
+    ClarificationPrompt,
+>>>>>>> Stashed changes
     ExecutePlanRequest,
     ExecutePlanResponse,
     PlanRequest,
@@ -18,26 +22,80 @@ from companion.models.schemas import (
     StepResult,
     VerificationResult,
 )
+<<<<<<< Updated upstream
+=======
+from companion.models.session_builder_plan import PromptRequest, PromptResponse, SessionBuilderPlan
+from companion.planner import (
+    HeuristicPlannerBackend,
+    LLMPlannerBackend,
+    SessionPlannerBackend,
+    compile_plan,
+)
+from companion.planner.base import PlannerResult
+from companion.storage.plan_repository import PlanRepository, get_plan_repository, reset_plan_repository
+>>>>>>> Stashed changes
 
 router = APIRouter()
-_saved_plans: dict[str, dict[str, Any]] = {}
-_expired_plan_ids: dict[str, float] = {}
 
 
-def _prune_saved_plans(ttl_seconds: float) -> None:
-    now = time.monotonic()
-    expired_ids: list[str] = []
-    for plan_id, payload in _saved_plans.items():
-        created_at = float(payload.get("created_at", 0.0))
-        if now - created_at > ttl_seconds:
-            expired_ids.append(plan_id)
-    for plan_id in expired_ids:
-        _saved_plans.pop(plan_id, None)
-        _expired_plan_ids[plan_id] = now
-    for plan_id, expired_at in list(_expired_plan_ids.items()):
-        if now - expired_at > ttl_seconds:
-            _expired_plan_ids.pop(plan_id, None)
+# ---------------------------------------------------------------------------
+# Dependency helpers
+# ---------------------------------------------------------------------------
 
+def get_reaper_client(settings: Settings = Depends(get_settings)) -> ReaperBridgeClient:
+    return get_bridge_client(settings)
+
+
+def get_repo(settings: Settings = Depends(get_settings)) -> PlanRepository:
+    return get_plan_repository(
+        db_path=settings.db_path,
+        ttl_seconds=settings.saved_plan_ttl_seconds,
+    )
+
+
+def _select_planner(settings: Settings):
+    """Return the primary planner backend based on config."""
+    if settings.llm_provider == "llm":
+        return LLMPlannerBackend()
+    if settings.llm_provider == "session":
+        return SessionPlannerBackend()
+    return HeuristicPlannerBackend()
+
+
+def _plan_result_to_response(result: PlannerResult, plan_id: str | None = None) -> PlanResponse:
+    if result.requires_clarification:
+        return PlanResponse(
+            ok=True,
+            summary="Clarification needed.",
+            source="heuristic",
+            requires_clarification=True,
+            clarification=ClarificationPrompt(
+                id=result.clarification_id or "unknown",
+                question=result.clarification_question or "",
+                options=[ClarificationOption(value=o, label=o) for o in result.clarification_options],
+            ),
+            steps=[],
+        )
+    if result.unsupported or result.plan is None:
+        return PlanResponse(
+            ok=False,
+            summary=result.unsupported_reason or "No matching workflow.",
+            source="unsupported",
+            steps=[],
+        )
+    steps = compile_plan(result.plan)
+    return PlanResponse(
+        ok=True,
+        summary=result.plan.summary,
+        source="heuristic",
+        plan_id=plan_id,
+        steps=steps,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Track-match helpers (verification)
+# ---------------------------------------------------------------------------
 
 def _track_matches_ref(track: dict[str, Any], ref: dict[str, Any] | None) -> bool:
     if not isinstance(track, dict) or not isinstance(ref, dict):
@@ -70,7 +128,7 @@ def _fx_matches(track: dict[str, Any], fx_name: str | None) -> str | None:
 
 def _send_mode_matches(send: dict[str, Any], pre_fader: bool) -> bool:
     if not isinstance(send, dict):
-      return False
+        return False
     if isinstance(send.get("pre_fader"), bool):
         return send.get("pre_fader") == pre_fader
     mode_name = str(send.get("send_mode_name") or "").lower()
@@ -82,7 +140,15 @@ def _send_mode_matches(send: dict[str, Any], pre_fader: bool) -> bool:
     return not pre_fader
 
 
+<<<<<<< Updated upstream
 def _verify_steps(steps: list[PlanStep], results: list[StepResult], final_state: dict[str, Any]) -> tuple[list[VerificationResult], list[str]]:
+=======
+def _verify_steps(
+    steps: list[BridgePlanStep],
+    results: list[StepResult],
+    final_state: dict[str, Any],
+) -> tuple[list[VerificationResult], list[str]]:
+>>>>>>> Stashed changes
     accepted_by_index = {result.index: result for result in results if result.status in {"accepted", "ok"}}
     verification_results: list[VerificationResult] = []
     verification_errors: list[str] = []
@@ -93,8 +159,8 @@ def _verify_steps(steps: list[PlanStep], results: list[StepResult], final_state:
             continue
 
         if step.tool in {"create_track", "create_bus"}:
-            track_ref: dict[str, Any] | None = None
             detail = executed.detail if isinstance(executed.detail, dict) else {}
+            track_ref: dict[str, Any] | None = None
             if isinstance(detail, dict) and detail.get("track_id") is not None:
                 track_ref = {"type": "track_id", "value": detail.get("track_id")}
             elif step.args.get("name"):
@@ -169,7 +235,11 @@ def _verify_steps(steps: list[PlanStep], results: list[StepResult], final_state:
         if step.tool == "project.set_tempo":
             expected_bpm = step.args.get("bpm")
             actual_bpm = final_state.get("tempo")
-            ok = isinstance(expected_bpm, (int, float)) and isinstance(actual_bpm, (int, float)) and abs(float(actual_bpm) - float(expected_bpm)) < 0.001
+            ok = (
+                isinstance(expected_bpm, (int, float))
+                and isinstance(actual_bpm, (int, float))
+                and abs(float(actual_bpm) - float(expected_bpm)) < 0.001
+            )
             verification_results.append(
                 VerificationResult(
                     index=index,
@@ -187,9 +257,49 @@ def _verify_steps(steps: list[PlanStep], results: list[StepResult], final_state:
     return verification_results, verification_errors
 
 
+<<<<<<< Updated upstream
 def get_reaper_client(settings: Settings = Depends(get_settings)) -> ReaperBridgeClient:
     return get_bridge_client(settings)
 
+=======
+def _format_verification_error(index: int, action_id: str | None, check: str, message: str) -> str:
+    if action_id:
+        return f"step {index} action {action_id} {check}: {message}"
+    return f"step {index} {check}: {message}"
+
+
+def _format_apply_failure(bridge_result: dict[str, Any], verification_errors: list[str]) -> str:
+    results = bridge_result.get("results", [])
+    if isinstance(results, list):
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status", "unknown"))
+            if status in {"accepted", "ok"}:
+                continue
+            action_name = item.get("action") or item.get("tool") or "unknown"
+            action_id = item.get("action_id")
+            detail = item.get("detail")
+            error_message = None
+            if isinstance(detail, dict):
+                error_message = detail.get("error") or detail.get("message")
+            elif detail is not None:
+                error_message = str(detail)
+            if error_message:
+                if action_id:
+                    return f"action {action_id} ({action_name}) failed: {error_message}"
+                return f"{action_name} failed: {error_message}"
+    if bridge_result.get("error"):
+        return str(bridge_result.get("error"))
+    if verification_errors:
+        return "; ".join(verification_errors)
+    return "bridge execution failed"
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+>>>>>>> Stashed changes
 
 @router.get("/health")
 def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
@@ -236,46 +346,91 @@ def project_state(client: ReaperBridgeClient = Depends(get_reaper_client)) -> di
 @router.post("/plan", response_model=PlanResponse)
 def plan_endpoint(
     payload: PlanRequest,
+    settings: Settings = Depends(get_settings),
     client: ReaperBridgeClient = Depends(get_reaper_client),
+    repo: PlanRepository = Depends(get_repo),
 ) -> PlanResponse:
-    _prune_saved_plans(client._settings.saved_plan_ttl_seconds)
     project_state = payload.state or client.get_state()
+    planner = _select_planner(settings)
     try:
-        response = plan_prompt_to_actions(
+        result = planner.plan(
             payload.prompt,
             project_state=project_state,
-            clarification_answers=payload.clarification_answers,
+            clarification_answers=payload.clarification_answers or {},
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    if not response.steps and response.ok:
-        return response
-    if response.steps:
-        plan_id = str(uuid.uuid4())
-        _saved_plans[plan_id] = {
-            "created_at": time.monotonic(),
-            "steps": list(response.steps),
-        }
-        response = response.model_copy(update={"plan_id": plan_id})
-    return response
+
+    # If unsupported and heuristic fallback is allowed, try heuristic.
+    if result.unsupported and settings.llm_allow_heuristic_fallback and settings.llm_provider != "heuristic":
+        result = HeuristicPlannerBackend().plan(
+            payload.prompt,
+            project_state=project_state,
+            clarification_answers=payload.clarification_answers or {},
+        )
+
+    if result.requires_clarification or result.unsupported or result.plan is None:
+        return _plan_result_to_response(result)
+
+    plan_id = repo.save(result.plan, source=settings.llm_provider, prompt=payload.prompt)
+    return _plan_result_to_response(result, plan_id=plan_id)
 
 
+<<<<<<< Updated upstream
+=======
+@router.post("/prompt", response_model=PromptResponse)
+def prompt_endpoint(
+    payload: PromptRequest,
+    settings: Settings = Depends(get_settings),
+    repo: PlanRepository = Depends(get_repo),
+) -> PromptResponse:
+    prompt = payload.prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt must not be empty")
+    planner = SessionPlannerBackend()
+    try:
+        result = planner.plan(prompt)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if result.unsupported or result.plan is None:
+        raise HTTPException(status_code=400, detail=result.unsupported_reason or "no supported actions found")
+    plan_id = repo.save(result.plan, source="session", prompt=prompt)
+    return PromptResponse(plan_id=plan_id, plan=result.plan)
+
+
+>>>>>>> Stashed changes
 @router.post("/execute-plan", response_model=ExecutePlanResponse)
 def execute_plan(
     payload: ExecutePlanRequest,
+    settings: Settings = Depends(get_settings),
     client: ReaperBridgeClient = Depends(get_reaper_client),
+    repo: PlanRepository = Depends(get_repo),
 ) -> ExecutePlanResponse:
-    _prune_saved_plans(client._settings.saved_plan_ttl_seconds)
     steps = payload.steps
+<<<<<<< Updated upstream
+=======
+    typed_plan: SessionBuilderPlan | None = None
+
+>>>>>>> Stashed changes
     if payload.plan_id:
-        saved_plan = _saved_plans.get(payload.plan_id)
-        if not saved_plan:
-            if payload.plan_id in _expired_plan_ids:
-                raise HTTPException(status_code=410, detail=f"expired plan_id '{payload.plan_id}'")
+        if repo.is_expired(payload.plan_id):
+            raise HTTPException(status_code=410, detail=f"expired plan_id '{payload.plan_id}'")
+        stored = repo.get(payload.plan_id)
+        if stored is None:
             raise HTTPException(status_code=404, detail=f"unknown plan_id '{payload.plan_id}'")
+<<<<<<< Updated upstream
         steps = saved_plan.get("steps")
+=======
+        typed_plan, meta = stored
+        try:
+            steps = compile_plan(typed_plan)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+>>>>>>> Stashed changes
     if not steps:
         raise HTTPException(status_code=400, detail="plan must include at least one step")
+
     errors = validate_plan_steps(steps)
     if errors:
         raise HTTPException(status_code=400, detail="; ".join(errors))

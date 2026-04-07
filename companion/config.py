@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     bridge_poll_interval_ms: int = Field(200)
     bridge_timeout_seconds: float = Field(10.0)
     saved_plan_ttl_seconds: float = Field(300.0)
+    db_path: Path = Field(Path("data") / "reapergpt.db")
 
     model_config = ConfigDict(
         env_file=".env",
@@ -37,6 +38,15 @@ class Settings(BaseSettings):
             normalized = value.strip().lower()
             return normalized not in {"false", "0", "no", "off", "", "release"}
         return bool(value)
+
+    @field_validator("db_path", mode="before")
+    @classmethod
+    def _normalize_db_path(cls, value: object) -> Path:
+        if isinstance(value, Path):
+            return value
+        if isinstance(value, str) and value.strip():
+            return Path(value.strip())
+        return Path("data") / "reapergpt.db"
 
     @field_validator("bridge_root", mode="before")
     @classmethod
